@@ -107,7 +107,7 @@ body {
   flex-direction: column;
   gap: 18px;
 }
-@media (max-width: 760px) {
+@media (max-width: 600px) {
   .lobby-grid {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1147,13 +1147,13 @@ body.touch-mode .controls-help .keys-help {
 }
 /* Resting spots (bottom corners) until a thumb touches down */
 .stick-left .stick-base {
-  left: 110px;
+  left: 28px;
   top: auto;
   bottom: 40px;
   transform: none;
 }
 .stick-right .stick-base {
-  right: 110px;
+  right: 28px;
   left: auto;
   top: auto;
   bottom: 40px;
@@ -1302,33 +1302,84 @@ body.touch-mode #game {
   touch-action: none;
 }
 
-/* Portrait phone in a game: suggest landscape */
-.rotate-hint {
+/* Portrait phone in a game: full-screen "turn your phone" (hidden in landscape) */
+.rotate-overlay {
   display: none;
 }
-@media (orientation: portrait) {
-  body.touch-mode.in-game .rotate-hint {
-    display: block;
+@media (orientation: portrait) and (max-width: 600px) {
+  body.touch-mode.in-game:not(.portrait-ok) .rotate-overlay {
     position: fixed;
-    top: 104px;
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 8;
-    padding: 6px 12px;
-    border-radius: 8px;
-    background: rgba(22, 25, 35, 0.85);
-    border: 1px solid var(--line);
-    font-size: 12px;
-    white-space: nowrap;
-    pointer-events: none;
-    animation: rotate-hint-out 0.6s ease 6s forwards;
+    inset: 0;
+    z-index: 25; /* above the game, HUD and sticks; below the loading spinner */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 24px;
+    text-align: center;
+    background: rgba(11, 13, 18, 0.94);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
   }
 }
-@keyframes rotate-hint-out {
-  to {
-    opacity: 0;
-    visibility: hidden;
+.rotate-overlay h2 {
+  margin: 8px 0 0;
+  font-size: 22px;
+  font-weight: 800;
+}
+.rotate-overlay p {
+  margin: 0;
+  max-width: 300px;
+  font-size: 14px;
+  line-height: 1.45;
+  color: #b9bfcf;
+}
+.rotate-overlay .rotate-note {
+  font-size: 13px;
+  color: #ffd76a;
+}
+.rotate-phone {
+  width: 54px;
+  height: 92px;
+  border: 4px solid #e8eaf2;
+  border-radius: 12px;
+  position: relative;
+  animation: rotate-phone 2.2s ease-in-out infinite;
+}
+.rotate-phone span {
+  position: absolute;
+  left: 50%;
+  bottom: 6px;
+  width: 14px;
+  height: 4px;
+  margin-left: -7px;
+  border-radius: 2px;
+  background: #e8eaf2;
+}
+@keyframes rotate-phone {
+  0%,
+  20% {
+    transform: rotate(0deg);
   }
+  55%,
+  85% {
+    transform: rotate(-90deg);
+    border-color: var(--accent-2);
+  }
+  100% {
+    transform: rotate(0deg);
+  }
+}
+.link-btn {
+  font: inherit;
+  font-size: 13px;
+  color: var(--muted);
+  background: none;
+  border: none;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 6px;
 }
 
 /* ---------- Loading spinner ---------- */
@@ -1412,4 +1463,77 @@ body.touch-mode #game {
   border: 3px solid rgba(255, 255, 255, 0.12);
   border-top-color: var(--accent-2);
   animation: spin 0.8s linear infinite;
+}
+
+/* ---------- Responsive touch HUD ---------- */
+
+/* Match / zone line: right of the minimap, clear of the top-right buttons */
+body.touch-mode .zone-info {
+  left: 140px;
+  transform: none;
+  top: 14px;
+  max-width: calc(100% - 140px - 220px);
+  white-space: normal;
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+/* Phones: compact weapon slots between the joysticks */
+@media (max-width: 820px) {
+  body.touch-mode .weapon-slots {
+    gap: 5px;
+  }
+  body.touch-mode .weapon-slots li {
+    padding: 6px 9px;
+    font-size: 12px;
+  }
+  body.touch-mode .weapon-slots .slot-ammo {
+    display: none;
+  }
+}
+
+/* Short screens (phones in landscape): compact controls card in the middle */
+@media (max-height: 500px) {
+  .controls-help,
+  body.touch-mode .controls-help {
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: min(440px, calc(100% - 32px));
+    font-size: 11px;
+    padding: 8px 10px;
+  }
+  .controls-help dl {
+    grid-template-columns: auto 1fr auto 1fr;
+    gap: 4px 8px;
+  }
+  .controls-help kbd {
+    font-size: 10px;
+  }
+  .controls-title {
+    margin-bottom: 4px;
+  }
+  /* keep clear of the action buttons on the right */
+  body.touch-mode .controls-help {
+    width: min(420px, calc(100% - 290px));
+  }
+}
+
+/* Short screens: smaller lobby header so more fits without scrolling */
+@media (max-height: 500px) {
+  .lobby {
+    padding-top: 14px;
+    gap: 12px;
+  }
+  .logo {
+    font-size: 44px;
+  }
+  .tagline {
+    margin-top: 6px;
+    font-size: 13px;
+  }
+  .card {
+    padding: 14px;
+    gap: 10px;
+  }
 }

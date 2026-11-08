@@ -28,6 +28,9 @@ const ui = {
   helpBtn: $<HTMLButtonElement>("help"),
   help: $("controls-help"),
   fullscreen: $<HTMLButtonElement>("fullscreen"),
+  rotateGo: $<HTMLButtonElement>("rotate-go"),
+  rotateIos: $("rotate-ios"),
+  rotateSkip: $<HTMLButtonElement>("rotate-skip"),
   loader: $("loader"),
   loaderText: $("loader-text"),
   loaderSub: $("loader-sub"),
@@ -49,19 +52,28 @@ function hideLoader() {
 
 // ---------- Fullscreen (phones) ----------
 
+/** Fullscreen, and (on Android) lock to landscape. iPhone browsers don't allow either. */
+async function goFullscreenLandscape() {
+  try {
+    if (!document.fullscreenElement) await document.documentElement.requestFullscreen();
+    await (screen.orientation as any)?.lock?.("landscape").catch(() => {});
+  } catch {
+    /* not supported (e.g. iPhone Safari) */
+  }
+}
+
 ui.fullscreen.onclick = async () => {
   ui.fullscreen.blur();
-  try {
-    if (document.fullscreenElement) await document.exitFullscreen();
-    else {
-      await document.documentElement.requestFullscreen();
-      // Android lets games lock landscape while fullscreen (iPhone ignores this).
-      await (screen.orientation as any)?.lock?.("landscape").catch(() => {});
-    }
-  } catch {
-    /* not supported (e.g. iPhone Safari): nothing to do */
-  }
+  if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
+  else await goFullscreenLandscape();
 };
+
+// "Turn your phone sideways" screen (shown by CSS in portrait during a game)
+const canFullscreen = typeof document.documentElement.requestFullscreen === "function";
+ui.rotateGo.hidden = !canFullscreen; // iPhone: no fullscreen / rotation lock for websites…
+ui.rotateIos.hidden = canFullscreen; // …so explain how to rotate instead
+ui.rotateGo.onclick = () => goFullscreenLandscape();
+ui.rotateSkip.onclick = () => document.body.classList.add("portrait-ok");
 
 let lobbyRoom: Room | undefined;
 let gameRoom: Room | undefined;

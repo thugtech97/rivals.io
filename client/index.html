@@ -117,7 +117,15 @@
         <button data-action="drop" class="touch-btn"><b>⤓</b><span>Drop</span></button>
       </div>
     </div>
-    <div id="rotate-hint" class="rotate-hint">↻ Turn your phone sideways for a bigger view</div>
+    <!-- Phones in portrait during a game: ask to rotate (disappears as soon as they do) -->
+    <div id="rotate-overlay" class="rotate-overlay">
+      <div class="rotate-phone" aria-hidden="true"><span></span></div>
+      <h2>Turn your phone sideways</h2>
+      <p>rivals.io plays best in landscape: you see more of the map and have room for both thumbs.</p>
+      <button id="rotate-go" class="btn btn-primary">⛶ Fullscreen &amp; landscape</button>
+      <p id="rotate-ios" class="rotate-note" hidden>On iPhone: open Control Center, turn off <b>Rotation Lock</b>, then turn your phone.</p>
+      <button id="rotate-skip" class="link-btn">Play in portrait anyway</button>
+    </div>
 
     <!-- Top-right buttons -->
     <div id="hud" class="hud-toolbar" hidden>
