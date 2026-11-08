@@ -4,6 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>rivals.io</title>
+    <!-- Tab icon: SVG for modern browsers, PNG fallback, and an icon for phone home screens -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#12141c" />
     <!-- Fonts: Black Ops One for the logo, Rubik for the UI (falls back to system fonts offline) -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -86,8 +91,37 @@
     </main>
 
     <!-- In-game HUD and Phaser canvas -->
+    <!-- Loading spinner (joining / creating a room, waking the server, building the map) -->
+    <div id="loader" class="loader" hidden>
+      <div class="spinner" aria-hidden="true"></div>
+      <div class="loader-text">
+        <div id="loader-text">Joining…</div>
+        <div id="loader-sub" class="loader-sub"></div>
+      </div>
+    </div>
+
+    <!-- Phone / tablet controls (shown in touch mode while alive in a game) -->
+    <div id="touch-controls" class="touch-controls" hidden>
+      <div id="stick-move" class="stick-zone stick-left">
+        <div class="stick-base"><div class="stick-knob"></div></div>
+        <span class="stick-label">MOVE</span>
+      </div>
+      <div id="stick-aim" class="stick-zone stick-right">
+        <div class="stick-base"><div class="stick-knob"></div></div>
+        <span class="stick-label">AIM · PUSH TO SHOOT</span>
+      </div>
+      <div class="touch-buttons">
+        <button data-action="pickup" class="touch-btn"><b>✋</b><span>Pick up</span></button>
+        <button data-action="reload" class="touch-btn"><b>⟳</b><span>Reload</span></button>
+        <button data-action="next-weapon" class="touch-btn"><b>⇄</b><span>Switch</span></button>
+        <button data-action="drop" class="touch-btn"><b>⤓</b><span>Drop</span></button>
+      </div>
+    </div>
+    <div id="rotate-hint" class="rotate-hint">↻ Turn your phone sideways for a bigger view</div>
+
     <!-- Top-right buttons -->
     <div id="hud" class="hud-toolbar" hidden>
+      <button id="fullscreen" class="icon-btn touch-only" title="Fullscreen">⛶</button>
       <button id="help" class="icon-btn" title="Controls (H)">?</button>
       <button id="mute" class="icon-btn" title="Sound on/off (M)">🔊</button>
       <button id="leave" class="icon-btn leave-btn" title="Leave the room (Esc)">Leave</button>
@@ -95,8 +129,17 @@
 
     <!-- Controls card: shown for a few seconds on join, then H / ? toggles it -->
     <div id="controls-help" class="panel controls-help" hidden>
-      <div class="controls-title">Controls <span class="controls-close">H to hide</span></div>
-      <dl>
+      <div class="controls-title">Controls <span class="controls-close keys-only">H to hide</span><span class="controls-close touch-only">tap ? to hide</span></div>
+      <dl class="touch-help">
+        <dt><kbd>Left thumb</kbd></dt><dd>Move</dd>
+        <dt><kbd>Right thumb</kbd></dt><dd>Aim, push to shoot</dd>
+        <dt><kbd>✋</kbd></dt><dd>Pick up / swap</dd>
+        <dt><kbd>⟳</kbd></dt><dd>Reload</dd>
+        <dt><kbd>⇄</kbd></dt><dd>Switch weapon</dd>
+        <dt><kbd>⤓</kbd></dt><dd>Drop weapon</dd>
+        <dt><kbd>Slots</kbd></dt><dd>Tap to hold</dd>
+      </dl>
+      <dl class="keys-help">
         <dt><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></dt><dd>Move</dd>
         <dt><kbd>Mouse</kbd></dt><dd>Aim</dd>
         <dt><kbd>Click</kbd></dt><dd>Shoot / swing</dd>

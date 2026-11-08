@@ -5,6 +5,7 @@ import { GameScene, type GameSceneData } from "./GameScene";
 import { Hud } from "./hud";
 import { sfx } from "./sound";
 import { startLobbyBackdrop, stopLobbyBackdrop } from "./lobbyBackdrop";
+import { TouchControls } from "./touchControls";
 import { ARENA_ROOM, IDLE_KICK_CODE, LOBBY_ROOM } from "../../shared/constants";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -26,9 +27,41 @@ const ui = {
   mute: $<HTMLButtonElement>("mute"),
   helpBtn: $<HTMLButtonElement>("help"),
   help: $("controls-help"),
+  fullscreen: $<HTMLButtonElement>("fullscreen"),
+  loader: $("loader"),
+  loaderText: $("loader-text"),
+  loaderSub: $("loader-sub"),
 };
 
 const hud = new Hud();
+const touch = new TouchControls();
+
+// ---------- Loading spinner ----------
+
+function showLoader(text: string, sub = "") {
+  ui.loaderText.textContent = text;
+  ui.loaderSub.textContent = sub;
+  ui.loader.hidden = false;
+}
+function hideLoader() {
+  ui.loader.hidden = true;
+}
+
+// ---------- Fullscreen (phones) ----------
+
+ui.fullscreen.onclick = async () => {
+  ui.fullscreen.blur();
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else {
+      await document.documentElement.requestFullscreen();
+      // Android lets games lock landscape while fullscreen (iPhone ignores this).
+      await (screen.orientation as any)?.lock?.("landscape").catch(() => {});
+    }
+  } catch {
+    /* not supported (e.g. iPhone Safari): nothing to do */
+  }
+};
 
 let lobbyRoom: Room | undefined;
 let gameRoom: Room | undefined;
@@ -60,10 +93,12 @@ function setStatus(state: "connecting" | "live" | "offline" | "paused", text: st
 async function connectLobby() {
   if (lobbyPaused) return;
   setStatus("connecting", "Connecting…");
+  renderRooms(); // shows the spinner until the list arrives
   try {
     lobbyRoom = await client.joinOrCreate(LOBBY_ROOM, { filter: { name: ARENA_ROOM } });
   } catch (err) {
     setStatus("offline", "Offline");
+    renderRooms();
     showError(`Can't reach the game server at ${SERVER_URL}. Is it running? Retrying…`);
     setTimeout(connectLobby, 3000);
     return;
@@ -175,6 +210,19 @@ function renderRooms() {
     ui.roomList.append(note);
     return;
   }
+  // Still connecting (or retrying): spinner instead of "no rooms".
+  const waiting = !lobbyRoom && (ui.status.dataset.state === "connecting" || ui.status.dataset.state === "offline");
+  if (waiting && rooms.length === 0) {
+    const li = document.createElement("li");
+    li.className = "room-empty";
+    const spin = document.createElement("span");
+    spin.className = "mini-spinner";
+    const text = document.createElement("span");
+    text.textContent = ui.status.dataset.state === "offline" ? "Can't reach the server, retrying…" : "Connecting to the server…";
+    li.append(spin, text);
+    ui.roomList.append(li);
+    return;
+  }
   if (rooms.length === 0) {
     const empty = document.createElement("li");
     empty.className = "room-empty";
@@ -222,7 +270,11 @@ function renderRooms() {
     join.className = state === "open" ? "btn btn-small btn-secondary" : "btn btn-small";
     join.textContent = "Join";
     join.disabled = state !== "open";
-    join.onclick = () => enterGame(() => client.joinById(room.roomId, { playerName: playerName() }));
+    join.onclick = () =>
+      enterGame(() => client.joinById(room.roomId, { playerName: playerName() }), {
+        button: join,
+        text: `Joining ${room.metadata?.roomName ?? "room"}…`,
+      });
 
     li.append(info, meta, join);
     ui.roomList.append(li);
@@ -232,33 +284,48 @@ function renderRooms() {
 // ---------- Creating / joining a game room ----------
 
 ui.quickPlay.onclick = () =>
-  enterGame(() => client.joinOrCreate(ARENA_ROOM, { playerName: playerName() }));
+  enterGame(() => client.joinOrCreate(ARENA_ROOM, { playerName: playerName() }), {
+    button: ui.quickPlay,
+    text: "Finding a match…",
+  });
 
 ui.createForm.onsubmit = (e) => {
   e.preventDefault();
-  enterGame(() =>
-    client.create(ARENA_ROOM, {
-      playerName: playerName(),
-      roomName: ui.roomName.value.trim(),
-      maxPlayers: Number(document.querySelector<HTMLInputElement>('input[name="max-players"]:checked')?.value ?? 8),
-    }),
+  enterGame(
+    () =>
+      client.create(ARENA_ROOM, {
+        playerName: playerName(),
+        roomName: ui.roomName.value.trim(),
+        maxPlayers: Number(document.querySelector<HTMLInputElement>('input[name="max-players"]:checked')?.value ?? 8),
+      }),
+    { button: ui.createForm.querySelector<HTMLButtonElement>("button[type=submit]")!, text: "Creating your room…" },
   );
 };
 
-async function enterGame(connect: () => Promise<Room>) {
+async function enterGame(connect: () => Promise<Room>, loading: { button: HTMLButtonElement; text: string }) {
   if (busy || gameRoom) return;
   sfx.unlock(); // browsers only allow sound after a click: this is that click
   busy = true;
   hideError();
+  loading.button.classList.add("loading");
+  showLoader(loading.text);
+  // A sleeping Fly.io server takes a few seconds to wake up: say so instead of looking stuck.
+  const slow = setTimeout(() => showLoader(loading.text, "Waking up the server, this can take a few seconds…"), 2500);
   try {
     gameRoom = await connect();
     // Dev builds only: the room is reachable from the console as window.__room (handy for testing).
     if (import.meta.env.DEV) (window as any).__room = gameRoom;
   } catch (err) {
+    clearTimeout(slow);
+    hideLoader();
+    loading.button.classList.remove("loading");
     showError(`Couldn't join: ${err instanceof Error ? err.message : String(err)}`);
     busy = false;
     return;
   }
+  clearTimeout(slow);
+  loading.button.classList.remove("loading");
+  showLoader("Building the map…");
 
   // Leave the lobby while playing; we rejoin it when we come back.
   await lobbyRoom?.leave().catch(() => {});
@@ -285,8 +352,11 @@ async function enterGame(connect: () => Promise<Room>) {
     onRoomName: (name) => (ui.hudRoom.textContent = name),
     onPlayerCount: (n) => (ui.hudPlayers.textContent = `${n} player${n === 1 ? "" : "s"}`),
     onMuteToggle: showMute,
+    touch,
+    onReady: hideLoader,
   };
   game.scene.add("game", GameScene, true, sceneData);
+  document.body.classList.add("in-game");
 
   gameRoom.onLeave((code) => backToLobby(code));
 }
@@ -295,6 +365,9 @@ function backToLobby(code?: number) {
   game?.destroy(true);
   game = undefined;
   gameRoom = undefined;
+  hideLoader();
+  touch.setShown(false);
+  document.body.classList.remove("in-game");
   hud.hide();
   ui.hud.hidden = true;
   setHelp(false);

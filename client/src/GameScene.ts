@@ -18,6 +18,7 @@ import type { Hud, SlotInfo } from "./hud";
 import { renderMap } from "./mapRender";
 import { Blood } from "./blood";
 import { GameMap } from "../../shared/map";
+import { isTouchMode, type TouchControls } from "./touchControls";
 import { gunStats, heldStats, MEDKIT_HEAL, SLOT_COUNT, WEAPONS, type WeaponId } from "../../shared/weapons";
 
 /** At or below this HP a soldier leaves a blood trail and your screen pulses red. */
@@ -106,11 +107,16 @@ export interface GameSceneData {
   onRoomName?: (name: string) => void;
   /** Called when M toggles sound (true = muted). */
   onMuteToggle?: (muted: boolean) => void;
+  /** On-screen sticks for phones / tablets. */
+  touch?: TouchControls;
+  /** Called once the map is built and you're in it (hides the loading spinner). */
+  onReady?: () => void;
 }
 
 const ANGLE_SEND_INTERVAL_MS = 50;
 /** Camera zoom: 1 = no zoom, higher = closer to the player. Override with ?zoom=0.5 in the URL. */
-const CAMERA_ZOOM = Number(new URLSearchParams(location.search).get("zoom")) || 1.4;
+const ZOOM_PARAM = Number(new URLSearchParams(location.search).get("zoom"));
+const CAMERA_ZOOM = ZOOM_PARAM || 1.4;
 /** Holding a sniper zooms the camera out so you can see as far as it shoots. */
 const SNIPER_ZOOM = Math.min(CAMERA_ZOOM, 0.9);
 /** The map is baked at this resolution so it stays sharp at the default zoom. */
@@ -127,6 +133,9 @@ export class GameScene extends Phaser.Scene {
   private onPlayerCount?: (count: number) => void;
   private onRoomName?: (name: string) => void;
   private onMuteToggle?: (muted: boolean) => void;
+  private touch?: TouchControls;
+  private onReady?: () => void;
+  private ready = false;
 
   private views = new Map<string, PlayerView>();
   private bullets = new Map<number, BulletView>();
@@ -172,6 +181,9 @@ export class GameScene extends Phaser.Scene {
     this.hud = data.hud;
     this.onRoomName = data.onRoomName;
     this.onMuteToggle = data.onMuteToggle;
+    this.touch = data.touch;
+    this.onReady = data.onReady;
+    this.ready = false;
     this.onPlayerCount = data.onPlayerCount;
     this.wasReloading = false;
     this.lastHeld = "";
@@ -195,7 +207,7 @@ export class GameScene extends Phaser.Scene {
     const cam = this.cameras.main;
     cam.setBackgroundColor("#0b0d12");
     cam.setBounds(-60, -60, ARENA_SIZE + 120, ARENA_SIZE + 120);
-    cam.setZoom(CAMERA_ZOOM);
+    cam.setZoom(this.baseZoom());
 
     // Controls: WASD / arrows move, mouse aims, left click attacks, R reloads,
     // 1/2/3 or the wheel switch weapons, G drops, E picks up / swaps.
@@ -208,6 +220,16 @@ export class GameScene extends Phaser.Scene {
       right: [kb.addKey(k.RIGHT), kb.addKey(k.D)],
     };
     kb.on("keydown-R", () => this.room.send("reload"));
+    // Touch buttons and tappable weapon slots
+    if (this.touch) {
+      this.touch.onAction = (a) => {
+        if (a === "reload") this.room.send("reload");
+        else if (a === "pickup") this.room.send("pickup");
+        else if (a === "drop") this.room.send("drop");
+        else this.cycleSlot(1);
+      };
+    }
+    this.hud.onSlotTap = (i) => this.selectSlot(i);
     kb.on("keydown-G", () => this.room.send("drop"));
     kb.on("keydown-E", () => this.room.send("pickup"));
     kb.on("keydown-ONE", () => this.selectSlot(0));
@@ -442,6 +464,23 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  /** Tell main.ts we're playable (map drawn + our soldier exists), once. */
+  private tryReady() {
+    if (this.ready || !this.map || !this.views.has(this.room.sessionId)) return;
+    this.ready = true;
+    this.onReady?.();
+  }
+
+  /**
+   * Camera zoom for this screen: 1.4 on a normal monitor, zoomed out on small screens
+   * (phones) so you still see about the same amount of the map.
+   */
+  private baseZoom(): number {
+    if (ZOOM_PARAM) return ZOOM_PARAM;
+    const shortSide = Math.min(this.scale.width, this.scale.height);
+    return Phaser.Math.Clamp(shortSide / 600, 0.62, CAMERA_ZOOM);
+  }
+
   // ---------- Map ----------
 
   /** Build (or replace) the map from a seed: same seed → same map as the server. */
@@ -450,6 +489,7 @@ export class GameScene extends Phaser.Scene {
     for (const o of this.mapObjects) o.destroy();
     this.map = new GameMap(seed);
     this.mapObjects = renderMap(this, this.map, MAP_RESOLUTION);
+    this.tryReady();
   }
 
   // ---------- Match ----------
@@ -501,7 +541,8 @@ export class GameScene extends Phaser.Scene {
     const watched = this.views.get(target)?.data;
     const sniper = !!watched?.alive && slotOf(watched, watched.active).weapon === "sniper";
     const cam = this.cameras.main;
-    const want = sniper ? SNIPER_ZOOM : CAMERA_ZOOM;
+    const base = this.baseZoom();
+    const want = sniper ? Math.min(base, SNIPER_ZOOM) * (base < CAMERA_ZOOM ? 0.85 : 1) : base;
     if (Math.abs(cam.zoom - want) > 0.001) cam.setZoom(cam.zoom + (want - cam.zoom) * 0.12);
   }
 
@@ -584,19 +625,27 @@ export class GameScene extends Phaser.Scene {
     const held = (list: Phaser.Input.Keyboard.Key[]) => list.some((key) => key.isDown);
     const pointer = this.input.activePointer;
 
-    // Aim from our soldier to the mouse, in world coordinates.
     const world = pointer.positionToCamera(this.cameras.main) as Phaser.Math.Vector2;
     let angle = this.myInput.angle;
-    if (mine) angle = Math.atan2(world.y - this.me.y, world.x - this.me.x);
+    const touch = this.touch && isTouchMode();
 
-    this.myInput = {
-      up: held(this.keys.up),
-      down: held(this.keys.down),
-      left: held(this.keys.left),
-      right: held(this.keys.right),
-      fire: pointer.leftButtonDown(),
-      angle,
-    };
+    if (touch) {
+      // Phone / tablet: left stick moves, right stick aims (push it to shoot).
+      const k = this.touch!.keys;
+      angle = this.touch!.aimAngle ?? angle;
+      this.myInput = { ...k, fire: this.touch!.firing, angle };
+    } else {
+      // Keyboard + mouse: aim from our soldier to the mouse, in world coordinates.
+      if (mine) angle = Math.atan2(world.y - this.me.y, world.x - this.me.x);
+      this.myInput = {
+        up: held(this.keys.up),
+        down: held(this.keys.down),
+        left: held(this.keys.left),
+        right: held(this.keys.right),
+        fire: pointer.leftButtonDown(),
+        angle,
+      };
+    }
 
     // Send immediately when keys/fire change; send aim-only changes at most every 50ms.
     const keys = `${+this.myInput.up}${+this.myInput.down}${+this.myInput.left}${+this.myInput.right}${+this.myInput.fire}`;
@@ -608,8 +657,11 @@ export class GameScene extends Phaser.Scene {
       this.lastSentAt = time;
     }
 
-    if (mine?.data.alive) this.drawCrosshair(world.x, world.y, mine.data.reloading);
-    else this.crosshair.clear(); // no crosshair while dead / spectating
+    if (mine?.data.alive && !touch) this.drawCrosshair(world.x, world.y, mine.data.reloading);
+    else this.crosshair.clear(); // no crosshair while dead / spectating / on touch screens
+
+    // Sticks only while you're alive (when dead, a tap switches who you're watching).
+    this.touch?.setShown(!!mine?.data.alive);
   }
 
   private updateHud(time: number, delta: number, mine?: PlayerView) {
@@ -648,7 +700,9 @@ export class GameScene extends Phaser.Scene {
         slots.push({ name: sl.weapon ? heldStats(sl.weapon).name : "", ammo: gunStats(sl.weapon) ? `${sl.ammo}/${sl.reserve}` : "", active: i === d.active });
       }
       this.hud.setSlots(d.alive ? slots : null);
-      this.hud.setPrompt(d.alive ? this.pickupPrompt(d) : "");
+      const prompt = d.alive ? this.pickupPrompt(d) : "";
+      this.hud.setPrompt(isTouchMode() ? prompt.replace(/^E:/, "✋") : prompt);
+      this.touch?.setPickupHint(!!prompt);
 
       const by = this.killedBy ? `Eliminated by ${this.killedBy}` : "Eliminated";
       if (d.alive || this.phase === "ended") {
@@ -660,7 +714,9 @@ export class GameScene extends Phaser.Scene {
         this.hud.setDead(
           true,
           `${by} · you placed #${d.place}`,
-          watching ? `👁 Spectating ${watching}${n > 1 ? "  ·  click / Space / ← → to switch" : ""}` : "",
+          watching
+            ? `👁 Spectating ${watching}${n > 1 ? (isTouchMode() ? "  ·  tap the screen to switch" : "  ·  click / Space / ← → to switch") : ""}`
+            : "",
         );
       } else {
         const secs = Math.max(1, Math.ceil((RESPAWN_MS - (time - this.diedAt)) / 1000));
@@ -732,6 +788,7 @@ export class GameScene extends Phaser.Scene {
     if (isMe) {
       this.me = { x: data.x, y: data.y };
       this.cameras.main.startFollow(soldier.root, true, 0.12, 0.12);
+      this.tryReady();
     }
   }
 

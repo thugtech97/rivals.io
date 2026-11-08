@@ -52,6 +52,17 @@ export class Hud {
     prompt: $("pickup-prompt"),
   };
   private last: Record<string, string> = {};
+  /** Touch screens: tapping a weapon slot selects it. */
+  onSlotTap?: (index: number) => void;
+
+  constructor() {
+    this.el.slots.addEventListener("pointerdown", (e) => {
+      const li = (e.target as HTMLElement).closest("li");
+      if (!li || !this.onSlotTap) return;
+      e.preventDefault();
+      this.onSlotTap([...this.el.slots.children].indexOf(li));
+    });
+  }
   readonly minimap = new Minimap($("minimap") as HTMLCanvasElement);
 
   show() {
