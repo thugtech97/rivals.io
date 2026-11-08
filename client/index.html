@@ -4,80 +4,159 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>rivals.io</title>
+    <!-- Fonts: Black Ops One for the logo, Rubik for the UI (falls back to system fonts offline) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Black+Ops+One&family=Rubik:wght@400;500;600;700;800&display=swap"
+    />
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
+    <!-- Lobby background: a real game map, slowly drifting, blurred (see lobbyBackdrop.ts) -->
+    <div id="lobby-bg" class="lobby-bg"></div>
+    <div id="lobby-shade" class="lobby-shade"></div>
+
     <!-- Lobby: pick a name, browse rooms, create or join one -->
     <main id="lobby" class="lobby">
-      <h1 class="logo">rivals<span>.io</span></h1>
+      <header class="hero">
+        <h1 class="logo">rivals<span>.io</span></h1>
+        <p class="tagline">Drop in. Loot up. Be the last soldier standing.</p>
+      </header>
 
-      <section class="card">
-        <label class="field">
-          <span>Your name</span>
-          <input id="player-name" maxlength="16" placeholder="Player" autocomplete="off" />
-        </label>
-        <button id="quick-play" class="btn btn-primary">Quick play</button>
-      </section>
+      <div class="lobby-grid">
+        <div class="lobby-col">
+          <section class="card card-play">
+            <label class="field">
+              <span>Your name</span>
+              <span class="input-wrap">
+                <span class="input-icon" aria-hidden="true">👤</span>
+                <input id="player-name" maxlength="16" placeholder="Enter your name" autocomplete="off" />
+              </span>
+            </label>
+            <button id="quick-play" class="btn btn-primary btn-big">
+              <span aria-hidden="true">▶</span> Quick play
+            </button>
+            <p class="card-note">Jumps into an open room, or starts a new one.</p>
+          </section>
 
-      <section class="card">
-        <div class="card-head">
-          <h2>Rooms</h2>
-          <span id="lobby-status" class="status">Connecting…</span>
+          <section class="card">
+            <h2>Create a room</h2>
+            <form id="create-form" class="create-form">
+              <label class="field">
+                <span>Room name</span>
+                <span class="input-wrap">
+                  <span class="input-icon" aria-hidden="true">🏷️</span>
+                  <input id="room-name" maxlength="24" placeholder="My arena" autocomplete="off" />
+                </span>
+              </label>
+              <div class="field">
+                <span>Max players</span>
+                <div class="segmented" role="radiogroup" aria-label="Max players">
+                  <label><input type="radio" name="max-players" value="2" /><span>2</span></label>
+                  <label><input type="radio" name="max-players" value="4" /><span>4</span></label>
+                  <label><input type="radio" name="max-players" value="8" checked /><span>8</span></label>
+                  <label><input type="radio" name="max-players" value="16" /><span>16</span></label>
+                </div>
+              </div>
+              <button type="submit" class="btn btn-secondary">Create &amp; join</button>
+            </form>
+          </section>
         </div>
-        <ul id="room-list" class="room-list"></ul>
-      </section>
 
-      <section class="card">
-        <h2>Create a room</h2>
-        <form id="create-form" class="create-form">
-          <label class="field">
-            <span>Room name</span>
-            <input id="room-name" maxlength="24" placeholder="My arena" autocomplete="off" />
-          </label>
-          <label class="field field-small">
-            <span>Max players</span>
-            <select id="max-players">
-              <option value="2">2</option>
-              <option value="4">4</option>
-              <option value="8" selected>8</option>
-              <option value="16">16</option>
-            </select>
-          </label>
-          <button type="submit" class="btn">Create &amp; join</button>
-        </form>
-      </section>
+        <section class="card card-rooms">
+          <div class="card-head">
+            <h2>Rooms</h2>
+            <span id="lobby-status" class="status" data-state="connecting">Connecting…</span>
+          </div>
+          <ul id="room-list" class="room-list"></ul>
+        </section>
+      </div>
 
       <p id="lobby-error" class="error" hidden></p>
+
+      <footer class="how-to">
+        <span><kbd>WASD</kbd> move</span>
+        <span><kbd>Mouse</kbd> aim &amp; shoot</span>
+        <span><kbd>E</kbd> loot</span>
+        <span>🔫 7 weapons · 🛡️ vests · ➕ medkits</span>
+        <span>🟥 stay out of the red zone</span>
+      </footer>
     </main>
 
     <!-- In-game HUD and Phaser canvas -->
-    <div id="hud" class="hud" hidden>
-      <span id="hud-room"></span>
-      <span id="hud-players"></span>
-      <span class="hint">WASD / arrows move · Mouse aim · Click shoot · R reload · Esc leave</span>
-      <button id="leave" class="btn btn-small">Leave</button>
+    <!-- Top-right buttons -->
+    <div id="hud" class="hud-toolbar" hidden>
+      <button id="help" class="icon-btn" title="Controls (H)">?</button>
+      <button id="mute" class="icon-btn" title="Sound on/off (M)">🔊</button>
+      <button id="leave" class="icon-btn leave-btn" title="Leave the room (Esc)">Leave</button>
+    </div>
+
+    <!-- Controls card: shown for a few seconds on join, then H / ? toggles it -->
+    <div id="controls-help" class="panel controls-help" hidden>
+      <div class="controls-title">Controls <span class="controls-close">H to hide</span></div>
+      <dl>
+        <dt><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></dt><dd>Move</dd>
+        <dt><kbd>Mouse</kbd></dt><dd>Aim</dd>
+        <dt><kbd>Click</kbd></dt><dd>Shoot / swing</dd>
+        <dt><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> <kbd>Wheel</kbd></dt><dd>Switch weapon</dd>
+        <dt><kbd>R</kbd></dt><dd>Reload</dd>
+        <dt><kbd>E</kbd></dt><dd>Pick up / swap</dd>
+        <dt><kbd>G</kbd></dt><dd>Drop weapon</dd>
+        <dt><kbd>M</kbd></dt><dd>Sound on/off</dd>
+        <dt><kbd>Esc</kbd></dt><dd>Leave</dd>
+      </dl>
     </div>
 
     <div id="combat-hud" hidden>
+      <div id="low-hp" class="vignette low-hp"></div>
+      <div id="hurt-flash" class="vignette hurt-flash"></div>
+      <canvas id="minimap" class="minimap"></canvas>
+
+      <div id="zone-info" class="zone-info"></div>
+      <div id="zone-warning" class="zone-warning" hidden>⚠ Outside the safe zone: −10 HP every second!</div>
+
       <div class="panel health">
-        <span class="label">HP</span>
-        <div class="hp-bar"><div id="hp-fill" class="hp-fill"></div></div>
-        <span id="hp-text" class="hp-text">100</span>
+        <div class="bar-row">
+          <span class="label">HP</span>
+          <div class="hp-bar"><div id="hp-fill" class="hp-fill"></div></div>
+          <span id="hp-text" class="hp-text">100</span>
+        </div>
+        <div id="armor-row" class="bar-row" hidden>
+          <span class="label">🛡</span>
+          <div class="hp-bar armor-bar"><div id="armor-fill" class="armor-fill"></div></div>
+          <span id="armor-text" class="hp-text">0</span>
+        </div>
       </div>
 
+      <ol id="weapon-slots" class="weapon-slots"></ol>
+      <div id="pickup-prompt" class="pickup-prompt" hidden></div>
+
       <div class="panel ammo">
-        <div><span id="ammo" class="mag">15</span><span class="sep">/</span><span id="reserve" class="res">45</span></div>
+        <div id="weapon-name" class="weapon-name">Pistol</div>
+        <div id="ammo-line"><span id="ammo" class="mag">12</span><span class="sep">/</span><span id="reserve" class="res">24</span></div>
         <div id="ammo-note" class="note"></div>
       </div>
 
       <div class="side">
+        <div class="panel room-card">
+          <span id="hud-room" class="room-title"></span>
+          <span id="hud-players" class="room-players"></span>
+        </div>
         <ol id="scoreboard" class="panel scoreboard"></ol>
         <ul id="killfeed" class="killfeed"></ul>
+      </div>
+
+      <div id="match-banner" class="match-banner" hidden>
+        <div id="banner-title" class="banner-title"></div>
+        <div id="banner-sub" class="banner-sub"></div>
       </div>
 
       <div id="death" class="death" hidden>
         <div class="death-title">You died</div>
         <div id="death-text"></div>
+        <div id="spectating" class="spectating" hidden></div>
       </div>
     </div>
     <div id="game"></div>
