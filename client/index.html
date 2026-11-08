@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>rivals.io</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <!-- Lobby: pick a name, browse rooms, create or join one -->
+    <main id="lobby" class="lobby">
+      <h1 class="logo">rivals<span>.io</span></h1>
+
+      <section class="card">
+        <label class="field">
+          <span>Your name</span>
+          <input id="player-name" maxlength="16" placeholder="Player" autocomplete="off" />
+        </label>
+        <button id="quick-play" class="btn btn-primary">Quick play</button>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Rooms</h2>
+          <span id="lobby-status" class="status">Connecting…</span>
+        </div>
+        <ul id="room-list" class="room-list"></ul>
+      </section>
+
+      <section class="card">
+        <h2>Create a room</h2>
+        <form id="create-form" class="create-form">
+          <label class="field">
+            <span>Room name</span>
+            <input id="room-name" maxlength="24" placeholder="My arena" autocomplete="off" />
+          </label>
+          <label class="field field-small">
+            <span>Max players</span>
+            <select id="max-players">
+              <option value="2">2</option>
+              <option value="4">4</option>
+              <option value="8" selected>8</option>
+              <option value="16">16</option>
+            </select>
+          </label>
+          <button type="submit" class="btn">Create &amp; join</button>
+        </form>
+      </section>
+
+      <p id="lobby-error" class="error" hidden></p>
+    </main>
+
+    <!-- In-game HUD and Phaser canvas -->
+    <div id="hud" class="hud" hidden>
+      <span id="hud-room"></span>
+      <span id="hud-players"></span>
+      <span class="hint">WASD / arrows move · Mouse aim · Click shoot · R reload · Esc leave</span>
+      <button id="leave" class="btn btn-small">Leave</button>
+    </div>
+
+    <div id="combat-hud" hidden>
+      <div class="panel health">
+        <span class="label">HP</span>
+        <div class="hp-bar"><div id="hp-fill" class="hp-fill"></div></div>
+        <span id="hp-text" class="hp-text">100</span>
+      </div>
+
+      <div class="panel ammo">
+        <div><span id="ammo" class="mag">15</span><span class="sep">/</span><span id="reserve" class="res">45</span></div>
+        <div id="ammo-note" class="note"></div>
+      </div>
+
+      <div class="side">
+        <ol id="scoreboard" class="panel scoreboard"></ol>
+        <ul id="killfeed" class="killfeed"></ul>
+      </div>
+
+      <div id="death" class="death" hidden>
+        <div class="death-title">You died</div>
+        <div id="death-text"></div>
+      </div>
+    </div>
+    <div id="game"></div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

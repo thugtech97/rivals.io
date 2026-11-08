@@ -1,0 +1,379 @@
+:root {
+  --bg: #12141c;
+  --card: #1c1f2b;
+  --line: #2c3142;
+  --text: #e8eaf2;
+  --muted: #8b91a7;
+  --accent: #ff5d73;
+  --accent-2: #4dd0e1;
+  --error: #ff8a80;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+.lobby {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 32px 16px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.logo {
+  margin: 0 0 8px;
+  font-size: 44px;
+  letter-spacing: -1px;
+  text-align: center;
+}
+.logo span {
+  color: var(--accent);
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.card h2 {
+  margin: 0;
+  font-size: 16px;
+}
+.card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.status {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  font-size: 13px;
+  color: var(--muted);
+}
+.field-small {
+  flex: 0 0 110px;
+}
+
+input,
+select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 15px;
+}
+input:focus,
+select:focus {
+  outline: 2px solid var(--accent-2);
+  outline-offset: -1px;
+}
+
+.create-form {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.btn {
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--line);
+  border: none;
+  border-radius: 8px;
+  padding: 10px 16px;
+  cursor: pointer;
+}
+.btn:hover:not(:disabled) {
+  filter: brightness(1.2);
+}
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+.btn-small {
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+.room-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.room {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.room-info {
+  flex: 1;
+  min-width: 0;
+}
+.room-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.room-host {
+  font-size: 12px;
+  color: var(--muted);
+}
+.room-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  font-size: 14px;
+}
+.room-empty {
+  color: var(--muted);
+  font-size: 14px;
+  padding: 8px 0;
+}
+
+.error {
+  color: var(--error);
+  text-align: center;
+  margin: 0;
+}
+
+#game {
+  position: fixed;
+  inset: 0;
+}
+#game:empty {
+  display: none;
+}
+
+.hud {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  max-width: calc(100% - 32px);
+  padding: 8px 12px 8px 16px;
+  background: rgba(28, 31, 43, 0.85);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 14px;
+  white-space: nowrap;
+}
+#hud-room {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hud .hint {
+  color: var(--muted);
+}
+@media (max-width: 640px) {
+  .hud .hint {
+    display: none;
+  }
+}
+
+/* ---------- Combat HUD ---------- */
+
+#combat-hud {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none; /* clicks go through to the game */
+  font-variant-numeric: tabular-nums;
+}
+
+.panel {
+  background: rgba(28, 31, 43, 0.85);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.health {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+}
+.health .label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+.hp-bar {
+  width: 160px;
+  height: 10px;
+  background: #0b0d12;
+  border-radius: 5px;
+  overflow: hidden;
+}
+.hp-fill {
+  height: 100%;
+  width: 100%;
+  background: #6fdc6f;
+  transition: width 0.15s ease-out;
+}
+.hp-fill[data-level="warn"] {
+  background: #f0c040;
+}
+.hp-fill[data-level="low"] {
+  background: #f05050;
+}
+.hp-text {
+  min-width: 28px;
+  font-weight: 700;
+}
+
+.ammo {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  padding: 10px 16px;
+  text-align: right;
+}
+.ammo .mag {
+  font-size: 30px;
+  font-weight: 800;
+}
+.ammo .mag[data-low="true"] {
+  color: #f05050;
+}
+.ammo .sep {
+  margin: 0 4px;
+  color: var(--muted);
+}
+.ammo .res {
+  font-size: 18px;
+  color: var(--muted);
+}
+.ammo .note {
+  font-size: 12px;
+  color: #f0c040;
+  min-height: 0;
+}
+.ammo .note:empty {
+  display: none;
+}
+
+.side {
+  position: absolute;
+  top: 64px;
+  right: 16px;
+  width: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.scoreboard {
+  list-style: none;
+  margin: 0;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+.scoreboard li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 0;
+}
+.scoreboard li span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.scoreboard li.me {
+  color: var(--accent-2);
+  font-weight: 700;
+}
+.scoreboard .kd {
+  color: var(--muted);
+}
+.killfeed {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+.killfeed li {
+  align-self: flex-end;
+  padding: 4px 10px;
+  background: rgba(28, 31, 43, 0.75);
+  border-radius: 6px;
+}
+
+.death {
+  position: absolute;
+  top: 40%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  padding: 16px 28px;
+  background: rgba(20, 8, 10, 0.8);
+  border: 1px solid #5a1f26;
+  border-radius: 12px;
+}
+.death-title {
+  font-size: 28px;
+  font-weight: 800;
+  color: #ff6b6b;
+  margin-bottom: 4px;
+}
+
+@media (max-width: 640px) {
+  .side {
+    display: none;
+  }
+  .hp-bar {
+    width: 100px;
+  }
+}
