@@ -1,33 +1,29 @@
-# Fly.io config for the rivals.io game server.
-# Change `app` if the name is already taken on Fly (it must be unique).
+# fly.toml app configuration file generated for rivals-io-game on 2026-11-08T20:39:36+08:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-app = "rivals-io-game"
-primary_region = "sin" # Singapore: lowest lag for players in South-East Asia
+app = 'rivals-io-game'
+primary_region = 'sin'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
 
 [env]
-  PORT = "2567"
+  PORT = '2567'
 
 [http_service]
   internal_port = 2567
   force_https = true
-  # Sleep when nobody is connected, wake up on the next visit (a few seconds).
-  # An empty server has no rooms to lose, so this only saves money.
-  auto_stop_machines = "stop"
+  auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 0
 
   [http_service.concurrency]
-    type = "connections"
-    soft_limit = 200
+    type = 'connections'
     hard_limit = 250
-
-# IMPORTANT: run exactly ONE machine. Game rooms live in that server's memory,
-# so a second machine would split players into separate worlds.
-# After the first deploy run:  fly scale count 1
+    soft_limit = 200
 
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "512mb"
+  size = 'shared-cpu-1x'
+  memory = '512mb'

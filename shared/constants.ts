@@ -56,6 +56,16 @@ export const ZONE_MIN_SIZE = 220;
 /** Damage per second while outside the zone. */
 export const ZONE_DAMAGE_PER_SEC = 10;
 
+// ---------- Idle players ----------
+
+/**
+ * A player who gives no input (move, aim, shoot, switch…) for this long is sent back
+ * to the lobby. Keeps forgotten tabs from holding the server awake (and billed).
+ */
+export const IDLE_KICK_MS = 10 * 60_000;
+/** WebSocket close code used for that kick, so the client can explain it. */
+export const IDLE_KICK_CODE = 4001;
+
 export const NAME_MAX_LENGTH = 16;
 export const ROOM_NAME_MAX_LENGTH = 24;
 

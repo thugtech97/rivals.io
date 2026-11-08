@@ -40,6 +40,8 @@ export class Player extends Schema {
   respawnAt = 0;
   /** Earliest time the zone may hurt this player again (at most once per second). */
   nextZoneDamageAt = 0;
+  /** Last time this player sent any input (for kicking AFK players). */
+  lastActiveAt = 0;
 }
 
 /**

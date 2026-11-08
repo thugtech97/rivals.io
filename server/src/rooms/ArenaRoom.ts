@@ -22,6 +22,8 @@ import {
   ZONE_SHRINK_MS,
   ZONE_START_MS,
   ZONE_START_SIZE,
+  IDLE_KICK_CODE,
+  IDLE_KICK_MS,
 } from "../../../shared/constants";
 import { angleDelta, applyInput, clamp, muzzlePosition, NO_INPUT, type InputState } from "../../../shared/movement";
 import type { BulletEndEvent, KillEvent, ShotEvent, SwingEvent } from "../../../shared/messages";
@@ -55,6 +57,8 @@ const SWITCH_DELAY_MS = 180;
 const zoneStartMs = Number(process.env.ZONE_START_MS) || ZONE_START_MS;
 const zoneHoldMs = Number(process.env.ZONE_HOLD_MS) || ZONE_HOLD_MS;
 const zoneShrinkMs = Number(process.env.ZONE_SHRINK_MS) || ZONE_SHRINK_MS;
+/** AFK kick timeout (IDLE_KICK_MS env var is only for quick local testing). */
+const idleKickMs = Number(process.env.IDLE_KICK_MS) || IDLE_KICK_MS;
 /** TEST_HOOKS=1 enables a "debugTeleport" message for automated tests. Never set it in production. */
 const TEST_HOOKS = process.env.TEST_HOOKS === "1";
 
@@ -112,6 +116,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
     // Clients only send what they're pressing and where they aim; the server decides the rest.
     this.onMessage("input", (client, input: Partial<InputState>) => {
+      this.markActive(client.sessionId);
       const angle = Number(input?.angle);
       this.heldKeys.set(client.sessionId, {
         left: !!input?.left,
@@ -124,12 +129,14 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     });
 
     this.onMessage("reload", (client) => {
+      this.markActive(client.sessionId);
       const player = this.state.players.get(client.sessionId);
       if (player) this.startReload(player);
     });
 
     // Switch weapon slot (1 / 2 / 3 or mouse wheel)
     this.onMessage("slot", (client, index: number) => {
+      this.markActive(client.sessionId);
       const p = this.state.players.get(client.sessionId);
       const i = Math.floor(Number(index));
       if (!p?.alive || !(i >= 0 && i < SLOT_COUNT) || p.active === i) return;
@@ -140,12 +147,14 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
     // G: drop the weapon in your hand
     this.onMessage("drop", (client) => {
+      this.markActive(client.sessionId);
       const p = this.state.players.get(client.sessionId);
       if (p?.alive) this.dropSlot(p, client.sessionId, p.active);
     });
 
     // E: pick up / swap the item you're standing on
     this.onMessage("pickup", (client) => {
+      this.markActive(client.sessionId);
       const p = this.state.players.get(client.sessionId);
       if (p?.alive) this.manualPickup(p, client.sessionId);
     });
@@ -176,6 +185,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     player.color = COLORS[this.state.players.size % COLORS.length];
     this.respawn(player);
 
+    player.lastActiveAt = this.clock.currentTime;
     this.state.players.set(client.sessionId, player);
     this.heldKeys.set(client.sessionId, { ...NO_INPUT });
     console.log(`[${this.roomId}] ${player.name} joined (${this.clients.length}/${this.maxClients})`);
@@ -249,6 +259,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     });
 
     this.moveBullets(dtMs, now);
+    this.kickIdlePlayers(now);
   }
 
   private fire(owner: string, player: Player, slot: WeaponSlot, gun: GunStats, now: number) {
@@ -608,6 +619,26 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     player.active = hand;
     player.reloading = false;
     this.state.items.delete(itemId);
+  }
+
+  // ---------- Idle players ----------
+
+  private markActive(sessionId: string) {
+    const p = this.state.players.get(sessionId);
+    if (p) p.lastActiveAt = this.clock.currentTime;
+  }
+
+  /**
+   * No input for idleKickMs (forgotten tab, AFK in the final zone…): send them back to
+   * the lobby, so an empty server can go to sleep instead of running (and costing) forever.
+   */
+  private kickIdlePlayers(now: number) {
+    this.state.players.forEach((p, id) => {
+      if (now - p.lastActiveAt < idleKickMs) return;
+      p.lastActiveAt = now; // only try once
+      console.log(`[${this.roomId}] ${p.name} kicked for being idle`);
+      this.clients.getById(id)?.leave(IDLE_KICK_CODE, "idle");
+    });
   }
 
   // ---------- Match flow ----------

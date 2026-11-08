@@ -1081,3 +1081,9 @@ kbd {
     width: 230px;
   }
 }
+.status[data-state="paused"] {
+  color: #ffd76a;
+}
+.status[data-state="paused"]::before {
+  background: #e0b84a;
+}

@@ -5,7 +5,7 @@ import { GameScene, type GameSceneData } from "./GameScene";
 import { Hud } from "./hud";
 import { sfx } from "./sound";
 import { startLobbyBackdrop, stopLobbyBackdrop } from "./lobbyBackdrop";
-import { ARENA_ROOM, LOBBY_ROOM } from "../../shared/constants";
+import { ARENA_ROOM, IDLE_KICK_CODE, LOBBY_ROOM } from "../../shared/constants";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -52,12 +52,13 @@ function playerName(): string {
 
 // ---------- Lobby: live room list ----------
 
-function setStatus(state: "connecting" | "live" | "offline", text: string) {
+function setStatus(state: "connecting" | "live" | "offline" | "paused", text: string) {
   ui.status.dataset.state = state;
   ui.status.textContent = text;
 }
 
 async function connectLobby() {
+  if (lobbyPaused) return;
   setStatus("connecting", "Connecting…");
   try {
     lobbyRoom = await client.joinOrCreate(LOBBY_ROOM, { filter: { name: ARENA_ROOM } });
@@ -65,6 +66,13 @@ async function connectLobby() {
     setStatus("offline", "Offline");
     showError(`Can't reach the game server at ${SERVER_URL}. Is it running? Retrying…`);
     setTimeout(connectLobby, 3000);
+    return;
+  }
+  // Went idle while we were connecting: hang up straight away.
+  if (lobbyPaused) {
+    const r = lobbyRoom;
+    lobbyRoom = undefined;
+    r.leave().catch(() => {});
     return;
   }
   hideError();
@@ -88,13 +96,85 @@ async function connectLobby() {
   lobbyRoom.onLeave(() => {
     lobbyRoom = undefined;
     // Unexpected disconnect (e.g. server restart) while still in the lobby: reconnect.
-    if (!gameRoom && !busy) setTimeout(connectLobby, 1000);
+    if (!gameRoom && !busy && !lobbyPaused) setTimeout(connectLobby, 1000);
   });
 }
+
+// ---------- Idle lobby: hang up so the server can sleep ----------
+//
+// The Fly.io machine only sleeps when nobody is connected. A lobby left open in a
+// forgotten tab would keep it awake (and billed), so we disconnect it when idle and
+// reconnect as soon as the player is back. Games in progress are never touched.
+
+const devParam = (name: string) => (import.meta.env.DEV ? Number(new URLSearchParams(location.search).get(name)) : 0);
+/** No mouse/keyboard for this long → pause. (?lobbyIdle=seconds in dev, for testing) */
+const LOBBY_IDLE_MS = (devParam("lobbyIdle") || 5 * 60) * 1000;
+/** Tab in the background for this long → pause. (?lobbyHidden=seconds in dev) */
+const LOBBY_HIDDEN_MS = (devParam("lobbyHidden") || 2 * 60) * 1000;
+
+let lobbyPaused = false;
+let lastActivity = Date.now();
+let hiddenSince = document.hidden ? Date.now() : 0;
+
+function markActive() {
+  lastActivity = Date.now();
+  if (lobbyPaused && !document.hidden) resumeLobby();
+}
+for (const ev of ["pointerdown", "pointermove", "keydown", "wheel", "touchstart"]) {
+  window.addEventListener(ev, markActive, { passive: true });
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) hiddenSince = Date.now();
+  else {
+    hiddenSince = 0;
+    markActive();
+  }
+});
+
+setInterval(
+  () => {
+    if (gameRoom || busy || lobbyPaused || ui.lobby.hidden) return;
+    const now = Date.now();
+    const idle = now - lastActivity >= LOBBY_IDLE_MS;
+    const hiddenTooLong = document.hidden && hiddenSince > 0 && now - hiddenSince >= LOBBY_HIDDEN_MS;
+    if (idle || hiddenTooLong) pauseLobby();
+  },
+  Math.min(15_000, LOBBY_HIDDEN_MS / 2, LOBBY_IDLE_MS / 2),
+);
+
+function pauseLobby() {
+  lobbyPaused = true;
+  const r = lobbyRoom;
+  lobbyRoom = undefined;
+  r?.leave().catch(() => {});
+  stopLobbyBackdrop(); // the animated map isn't needed while nobody is looking
+  setStatus("paused", "Paused");
+  rooms = [];
+  renderRooms();
+}
+
+function resumeLobby() {
+  lobbyPaused = false;
+  lastActivity = Date.now();
+  startLobbyBackdrop();
+  connectLobby();
+}
+
+// Dev builds only: lets tests check whether the lobby is connected.
+if (import.meta.env.DEV) (window as any).__lobbyConnected = () => !!lobbyRoom;
 
 function renderRooms() {
   ui.roomList.replaceChildren();
   if (lobbyRoom) setStatus("live", rooms.length ? `Live · ${rooms.length} room${rooms.length === 1 ? "" : "s"}` : "Live");
+  if (lobbyPaused) {
+    const note = document.createElement("li");
+    note.className = "room-empty";
+    const title = document.createElement("b");
+    title.textContent = "Paused while you were away";
+    note.append(title, "Move the mouse or press a key to see live rooms again.");
+    ui.roomList.append(note);
+    return;
+  }
   if (rooms.length === 0) {
     const empty = document.createElement("li");
     empty.className = "room-empty";
@@ -222,7 +302,8 @@ function backToLobby(code?: number) {
   ui.shade.hidden = false;
   startLobbyBackdrop();
   // 1000 = we left on purpose; anything else means we were disconnected.
-  if (code !== undefined && code !== 1000) showError("Disconnected from the room.");
+  if (code === IDLE_KICK_CODE) showError("You were away for 10 minutes, so you left the room. Jump back in anytime!");
+  else if (code !== undefined && code !== 1000) showError("Lost connection to the room (the server may have restarted). Please join again.");
   connectLobby();
 }
 
