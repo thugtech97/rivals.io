@@ -1,7 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "installCommand": "npm install --prefix client",
-  "buildCommand": "npm run build --prefix client",
-  "outputDirectory": "client/dist",
+  "installCommand": "if [ -f client/package.json ]; then npm install --prefix client; else npm install; fi",
+  "buildCommand": "if [ -f client/package.json ]; then npm run build --prefix client && rm -rf dist && cp -r client/dist dist; else npm run build; fi",
+  "outputDirectory": "dist",
   "framework": null
 }
