@@ -12,11 +12,11 @@
   "type": "module",
   "dependencies": {
     "@colyseus/schema": "^5.0.45",
-    "colyseus": "^0.18.12"
+    "colyseus": "^0.18.12",
+    "tsx": "^4.23.15"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
-    "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   },
   "private": true

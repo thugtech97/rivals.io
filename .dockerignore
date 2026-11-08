@@ -1,0 +1,9 @@
+# Only server/ and shared/ go into the image.
+**/node_modules
+**/dist
+client
+.git
+.github
+*.md
+.env
+*.log
