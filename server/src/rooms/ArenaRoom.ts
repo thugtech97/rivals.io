@@ -1,35 +1,62 @@
 import { Room, type Client } from "colyseus";
-import { AmmoPickup, ArenaState, Player } from "../schema/ArenaState";
+import { ArenaState, GroundItem, Player, WeaponSlot } from "../schema/ArenaState";
 import {
   ARENA_SIZE,
-  BULLET_DAMAGE,
-  BULLET_LIFETIME_MS,
-  BULLET_SPEED,
   DEFAULT_PLAYERS_PER_ROOM,
-  FIRE_INTERVAL_MS,
-  MAG_SIZE,
-  MAX_PICKUPS,
   MAX_PLAYERS_PER_ROOM,
-  MAX_RESERVE,
   MIN_PLAYERS_PER_ROOM,
   NAME_MAX_LENGTH,
-  PICKUP_AMMO,
   PICKUP_RADIUS,
-  PICKUP_RESPAWN_MS,
   PLAYER_MAX_HP,
   PLAYER_RADIUS,
-  RELOAD_MS,
   RESPAWN_MS,
   ROOM_NAME_MAX_LENGTH,
-  START_RESERVE,
   TICK_MS,
+  MATCH_COUNTDOWN_MS,
+  MATCH_END_MS,
+  MATCH_MIN_PLAYERS,
+  ZONE_DAMAGE_PER_SEC,
+  ZONE_HOLD_MS,
+  ZONE_MIN_SIZE,
+  ZONE_SHRINK_FACTOR,
+  ZONE_SHRINK_MS,
+  ZONE_START_MS,
+  ZONE_START_SIZE,
 } from "../../../shared/constants";
-import { applyInput, clamp, muzzlePosition, NO_INPUT, type InputState } from "../../../shared/movement";
-import type { BulletEndEvent, KillEvent, ShotEvent } from "../../../shared/messages";
-import { findFreeSpot, pointBlocked } from "../../../shared/map";
+import { angleDelta, applyInput, clamp, muzzlePosition, NO_INPUT, type InputState } from "../../../shared/movement";
+import type { BulletEndEvent, KillEvent, ShotEvent, SwingEvent } from "../../../shared/messages";
+import { GameMap, newMapSeed } from "../../../shared/map";
+import {
+  gunStats,
+  heldStats,
+  LOOT_TABLE,
+  MEDKIT_HEAL,
+  SLOT_COUNT,
+  STARTING_WEAPON,
+  VEST_ABSORB,
+  VEST_ARMOR,
+  WEAPONS,
+  type GunStats,
+  type MeleeStats,
+  type WeaponId,
+} from "../../../shared/weapons";
 
 /** Bullets are checked every few pixels so they can't skip through thin barricades. */
 const BULLET_STEP_PX = 8;
+/** How close you must be to an item to pick it up. */
+const ITEM_REACH = PLAYER_RADIUS + PICKUP_RADIUS + 4;
+/** Something you just dropped isn't auto-picked up again for this long (E still works). */
+const DROP_BLOCK_MS = 2500;
+/** Switching weapons takes a moment before you can attack. */
+const SWITCH_DELAY_MS = 180;
+
+// Zone timings. The env vars are only for quick local testing, e.g.
+// ZONE_START_MS=20000 npm run dev:server  → the zone starts shrinking after 20 seconds.
+const zoneStartMs = Number(process.env.ZONE_START_MS) || ZONE_START_MS;
+const zoneHoldMs = Number(process.env.ZONE_HOLD_MS) || ZONE_HOLD_MS;
+const zoneShrinkMs = Number(process.env.ZONE_SHRINK_MS) || ZONE_SHRINK_MS;
+/** TEST_HOOKS=1 enables a "debugTeleport" message for automated tests. Never set it in production. */
+const TEST_HOOKS = process.env.TEST_HOOKS === "1";
 
 /** Shown in the lobby's room list. */
 export interface ArenaMetadata {
@@ -46,6 +73,9 @@ interface ArenaOptions {
 interface Bullet {
   id: number;
   owner: string;
+  weapon: WeaponId;
+  damage: number;
+  speed: number;
   x: number;
   y: number;
   vx: number;
@@ -59,11 +89,18 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
   private heldKeys = new Map<string, InputState>();
   private bullets: Bullet[] = [];
   private nextBulletId = 1;
-  private nextPickupId = 1;
-  private nextPickupSpawnAt = 0;
+  private nextItemId = 1;
+  private matchStart = 0;
+  /** When the countdown / winner banner ends. */
+  private phaseEndsAt = 0;
+  /** This room's map. A new random one is generated for every match. */
+  private map!: GameMap;
 
   async onCreate(options: ArenaOptions) {
     this.setState(new ArenaState());
+    this.newMap();
+    this.resetZone();
+    this.spawnLoot();
 
     const requested = Math.round(Number(options.maxPlayers) || DEFAULT_PLAYERS_PER_ROOM);
     this.maxClients = clamp(requested, MIN_PLAYERS_PER_ROOM, MAX_PLAYERS_PER_ROOM);
@@ -91,9 +128,46 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       if (player) this.startReload(player);
     });
 
-    for (let i = 0; i < MAX_PICKUPS; i++) this.spawnPickup();
+    // Switch weapon slot (1 / 2 / 3 or mouse wheel)
+    this.onMessage("slot", (client, index: number) => {
+      const p = this.state.players.get(client.sessionId);
+      const i = Math.floor(Number(index));
+      if (!p?.alive || !(i >= 0 && i < SLOT_COUNT) || p.active === i) return;
+      p.active = i;
+      p.reloading = false;
+      p.nextShotAt = Math.max(p.nextShotAt, this.clock.currentTime + SWITCH_DELAY_MS);
+    });
+
+    // G: drop the weapon in your hand
+    this.onMessage("drop", (client) => {
+      const p = this.state.players.get(client.sessionId);
+      if (p?.alive) this.dropSlot(p, client.sessionId, p.active);
+    });
+
+    // E: pick up / swap the item you're standing on
+    this.onMessage("pickup", (client) => {
+      const p = this.state.players.get(client.sessionId);
+      if (p?.alive) this.manualPickup(p, client.sessionId);
+    });
+
+    if (TEST_HOOKS) {
+      this.onMessage("debugTeleport", (client, pos: { x: number; y: number }) => {
+        const p = this.state.players.get(client.sessionId);
+        if (p) {
+          p.x = Number(pos.x);
+          p.y = Number(pos.y);
+        }
+      });
+    }
 
     this.setSimulationInterval((dt) => this.tick(dt), TICK_MS);
+  }
+
+  /** No joining a match that's already being played (the room is also locked then). */
+  onAuth(_client: Client, _options: ArenaOptions) {
+    const phase = this.state.matchPhase;
+    if (phase === "live" || phase === "ended") throw new Error("A match is in progress, try again in a moment.");
+    return true;
   }
 
   onJoin(client: Client, options: ArenaOptions) {
@@ -109,6 +183,8 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
   onLeave(client: Client) {
     const player = this.state.players.get(client.sessionId);
+    // Leaving mid-match: your gear stays on the ground for others.
+    if (player?.alive && this.state.matchPhase === "live") this.dropEverything(player);
     this.state.players.delete(client.sessionId);
     this.heldKeys.delete(client.sessionId);
     console.log(`[${this.roomId}] ${player?.name ?? client.sessionId} left`);
@@ -118,72 +194,92 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
   private tick(dtMs: number) {
     const now = this.clock.currentTime;
+    this.updateMatch(now);
+    if (this.state.matchPhase === "live") this.updateZone(now);
+    const practice = this.state.matchPhase === "warmup" || this.state.matchPhase === "countdown";
 
     this.state.players.forEach((player, sessionId) => {
       const input = this.heldKeys.get(sessionId) ?? NO_INPUT;
 
       if (!player.alive) {
-        if (now >= player.respawnAt) this.respawn(player);
+        // Respawning only exists in warmup. During a match, dead means out.
+        if (practice && now >= player.respawnAt) this.respawn(player);
         return;
       }
 
-      applyInput(player, input, dtMs);
+      const slot = player.slots[player.active];
+      const held = heldStats(slot.weapon);
+      applyInput(player, input, dtMs, this.map, held.moveMul);
       player.angle = input.angle;
 
+      // In the red: lose ZONE_DAMAGE_PER_SEC the moment you touch it, then again every second.
+      // (Stepping in and out can't hurt you faster than once per second. Vests don't help.)
+      if (this.isOutsideZone(player.x, player.y) && now >= player.nextZoneDamageAt) {
+        player.nextZoneDamageAt = now + 1000;
+        this.hurt(player, sessionId, "", ZONE_DAMAGE_PER_SEC, now, "zone");
+        if (!player.alive) return;
+      }
+
       // Finish a reload.
+      const gun = gunStats(slot.weapon);
       if (player.reloading && now >= player.reloadEndsAt) {
-        const rounds = Math.min(MAG_SIZE - player.ammo, player.reserve);
-        player.ammo += rounds;
-        player.reserve -= rounds;
+        if (gun) {
+          const rounds = Math.min(gun.mag - slot.ammo, slot.reserve);
+          slot.ammo += rounds;
+          slot.reserve -= rounds;
+        }
         player.reloading = false;
       }
 
-      // Shoot while the mouse is held.
+      // Attack while the mouse is held: shoot, or swing a melee weapon / fists.
       if (input.fire && !player.reloading && now >= player.nextShotAt) {
-        if (player.ammo > 0) {
-          this.fire(sessionId, player, now);
-          if (player.ammo === 0) this.startReload(player);
+        if (gun) {
+          if (slot.ammo > 0) {
+            this.fire(sessionId, player, slot, gun, now);
+            if (slot.ammo === 0) this.startReload(player);
+          } else {
+            this.startReload(player); // does nothing if there are no spare rounds either
+          }
         } else {
-          this.startReload(player); // does nothing if the reserve is empty too
+          this.swing(sessionId, player, (slot.weapon || "fists") as WeaponId, held as MeleeStats, now);
         }
       }
 
-      this.collectPickups(player);
+      this.autoPickup(player, sessionId, now);
     });
 
     this.moveBullets(dtMs, now);
-
-    if (this.state.pickups.size < MAX_PICKUPS && now >= this.nextPickupSpawnAt) {
-      this.spawnPickup();
-      this.nextPickupSpawnAt = now + PICKUP_RESPAWN_MS;
-    }
   }
 
-  private fire(owner: string, player: Player, now: number) {
-    player.ammo--;
-    player.nextShotAt = now + FIRE_INTERVAL_MS;
+  private fire(owner: string, player: Player, slot: WeaponSlot, gun: GunStats, now: number) {
+    slot.ammo--;
+    player.nextShotAt = now + gun.fireMs;
 
-    const muzzle = muzzlePosition(player, player.angle);
+    const angle = player.angle + (Math.random() * 2 - 1) * gun.spread;
+    const muzzle = muzzlePosition(player, player.angle, gun.muzzle);
     const bullet: Bullet = {
       id: this.nextBulletId++,
       owner,
+      weapon: slot.weapon as WeaponId,
+      damage: gun.damage,
+      speed: gun.bulletSpeed,
       x: muzzle.x,
       y: muzzle.y,
-      vx: Math.cos(player.angle) * BULLET_SPEED,
-      vy: Math.sin(player.angle) * BULLET_SPEED,
-      expiresAt: now + BULLET_LIFETIME_MS,
+      vx: Math.cos(angle) * gun.bulletSpeed,
+      vy: Math.sin(angle) * gun.bulletSpeed,
+      expiresAt: now + gun.bulletLifeMs,
     };
 
-    const shot: ShotEvent = { id: bullet.id, owner, x: bullet.x, y: bullet.y, angle: player.angle };
+    const shot: ShotEvent = { id: bullet.id, owner, weapon: bullet.weapon, x: bullet.x, y: bullet.y, angle };
     this.broadcast("shot", shot);
 
     // Pressed against a wall? The barrel is inside it, so the shot stops right there
     // (no shooting through cover).
-    for (let i = 1; i <= 4; i++) {
-      const t = i / 4;
+    for (let i = 1; i <= 5; i++) {
+      const t = i / 5;
       const x = player.x + (muzzle.x - player.x) * t;
       const y = player.y + (muzzle.y - player.y) * t;
-      if (pointBlocked(x, y)) {
+      if (this.map.pointBlocked(x, y)) {
         const end: BulletEndEvent = { id: bullet.id, x, y, hit: "" };
         this.broadcast("bulletEnd", end);
         return;
@@ -199,8 +295,9 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
     for (const b of this.bullets) {
       // Move in small sub-steps so fast bullets can't skip over a player or thin cover.
-      const steps = Math.ceil((BULLET_SPEED * dt) / BULLET_STEP_PX);
+      const steps = Math.ceil((b.speed * dt) / BULLET_STEP_PX);
       let hit = "";
+      let armored = false;
       let gone = false;
 
       for (let s = 0; s < steps && !gone; s++) {
@@ -214,7 +311,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
           break;
         }
 
-        if (pointBlocked(b.x, b.y)) {
+        if (this.map.pointBlocked(b.x, b.y)) {
           gone = true; // stopped by cover
           break;
         }
@@ -224,7 +321,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
           if (Math.hypot(target.x - b.x, target.y - b.y) <= PLAYER_RADIUS) {
             hit = targetId;
             gone = true;
-            this.damage(target, targetId, b.owner, now);
+            armored = this.hurt(target, targetId, b.owner, b.damage, now, b.weapon);
           }
         });
       }
@@ -232,7 +329,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       if (!gone && now >= b.expiresAt) gone = true;
 
       if (gone) {
-        const end: BulletEndEvent = { id: b.id, x: b.x, y: b.y, hit };
+        const end: BulletEndEvent = { id: b.id, x: b.x, y: b.y, hit, armored };
         this.broadcast("bulletEnd", end);
       } else {
         survivors.push(b);
@@ -242,63 +339,490 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     this.bullets = survivors;
   }
 
-  private damage(target: Player, targetId: string, attackerId: string, now: number) {
-    target.hp = Math.max(0, target.hp - BULLET_DAMAGE);
-    if (target.hp > 0) return;
+  /** Melee: hits everyone in reach, inside the swing's arc, with nothing solid in between. */
+  private swing(owner: string, player: Player, weapon: WeaponId, stats: MeleeStats, now: number) {
+    player.nextShotAt = now + stats.swingMs;
+    const hits: string[] = [];
 
+    this.state.players.forEach((target, targetId) => {
+      if (targetId === owner || !target.alive) return;
+      const dx = target.x - player.x;
+      const dy = target.y - player.y;
+      const dist = Math.hypot(dx, dy);
+      // Reach is measured edge to edge (both soldiers are PLAYER_RADIUS wide).
+      if (dist - PLAYER_RADIUS * 2 > stats.range) return;
+      // Inside the arc? (a little extra for the target's body width)
+      const slack = Math.asin(Math.min(1, PLAYER_RADIUS / Math.max(dist, PLAYER_RADIUS)));
+      if (Math.abs(angleDelta(player.angle, Math.atan2(dy, dx))) > stats.arc / 2 + slack) return;
+      // No hitting through walls.
+      for (let t = 0.25; t < 1; t += 0.25) {
+        if (this.map.pointBlocked(player.x + dx * t, player.y + dy * t)) return;
+      }
+      this.hurt(target, targetId, owner, stats.damage, now, weapon);
+      hits.push(targetId);
+    });
+
+    const ev: SwingEvent = { owner, weapon, angle: player.angle, hits };
+    this.broadcast("swing", ev);
+  }
+
+  /**
+   * Damage a player. `attackerId` is "" for the zone. A vest soaks up most of a bullet or
+   * melee hit until it runs out (not zone damage). Returns true if the vest took some.
+   */
+  private hurt(target: Player, targetId: string, attackerId: string, amount: number, now: number, weapon: WeaponId | "zone"): boolean {
+    if (this.state.matchPhase === "ended") return false; // the match is decided: no more damage
+
+    let armored = false;
+    if (weapon !== "zone" && target.armor > 0) {
+      const absorbed = Math.min(target.armor, Math.round(amount * VEST_ABSORB));
+      target.armor -= absorbed;
+      amount -= absorbed;
+      armored = absorbed > 0;
+    }
+
+    target.hp = Math.max(0, target.hp - amount);
+    if (target.hp > 0) return armored;
+
+    if (this.state.matchPhase === "live") target.place = this.countAlive(); // e.g. 5 left → 5th place
     target.alive = false;
     target.deaths++;
     target.reloading = false;
     target.respawnAt = now + RESPAWN_MS;
+    this.dropEverything(target);
 
     const attacker = this.state.players.get(attackerId);
     if (attacker) attacker.kills++;
 
-    const kill: KillEvent = { killer: attackerId, victim: targetId };
+    const kill: KillEvent = { killer: attackerId, victim: targetId, weapon };
     this.broadcast("kill", kill);
+    return armored;
   }
 
   private startReload(player: Player) {
-    if (!player.alive || player.reloading || player.ammo >= MAG_SIZE || player.reserve <= 0) return;
+    const slot = player.slots[player.active];
+    const gun = gunStats(slot.weapon);
+    if (!gun || !player.alive || player.reloading || slot.ammo >= gun.mag || slot.reserve <= 0) return;
     player.reloading = true;
-    player.reloadEndsAt = this.clock.currentTime + RELOAD_MS;
+    player.reloadEndsAt = this.clock.currentTime + gun.reloadMs;
   }
 
+  /** Back in the game: full health, no vest, just the starting pistol. */
   private respawn(player: Player) {
-    const spot = findFreeSpot(PLAYER_RADIUS, PLAYER_RADIUS * 3);
+    const spot = this.map.findFreeSpot(PLAYER_RADIUS, PLAYER_RADIUS * 3, Math.random, this.spawnArea());
     player.x = spot.x;
     player.y = spot.y;
     player.hp = PLAYER_MAX_HP;
+    player.armor = 0;
     player.alive = true;
-    player.ammo = MAG_SIZE;
-    player.reserve = START_RESERVE;
     player.reloading = false;
+    player.nextShotAt = 0;
+    player.slots.forEach((s) => setSlot(s, ""));
+    const start = gunStats(STARTING_WEAPON)!;
+    setSlot(player.slots[0], STARTING_WEAPON, start.mag, start.mag * 2);
+    player.active = 0;
   }
 
-  // ---------- Ammo crates ----------
+  // ---------- Items on the ground ----------
 
-  private spawnPickup() {
-    const pickup = new AmmoPickup();
-    // Leave room around the crate so a soldier can actually reach it.
-    const spot = findFreeSpot(PICKUP_RADIUS + PLAYER_RADIUS * 2, 60);
-    pickup.x = spot.x;
-    pickup.y = spot.y;
-    this.state.pickups.set(String(this.nextPickupId++), pickup);
-  }
-
-  private collectPickups(player: Player) {
-    if (player.reserve >= MAX_RESERVE) return;
-    this.state.pickups.forEach((pickup, id) => {
-      if (Math.hypot(pickup.x - player.x, pickup.y - player.y) <= PLAYER_RADIUS + PICKUP_RADIUS) {
-        player.reserve = Math.min(MAX_RESERVE, player.reserve + PICKUP_AMMO);
-        this.state.pickups.delete(id);
-        this.nextPickupSpawnAt = Math.max(this.nextPickupSpawnAt, this.clock.currentTime + PICKUP_RESPAWN_MS);
+  /** Scatter the match's loot. This is the only time items appear by themselves. */
+  private spawnLoot() {
+    this.state.items.clear();
+    for (const entry of LOOT_TABLE) {
+      for (let i = 0; i < entry.count; i++) {
+        const spot = this.map.findFreeSpot(PICKUP_RADIUS + PLAYER_RADIUS * 2, 60);
+        const item = new GroundItem();
+        item.kind = entry.item;
+        item.x = spot.x;
+        item.y = spot.y;
+        if (entry.item === "weapon" && entry.weapon) {
+          item.weapon = entry.weapon;
+          const gun = gunStats(entry.weapon);
+          if (gun) {
+            item.ammo = gun.mag;
+            item.reserve = gun.lootReserve;
+          }
+        }
+        if (entry.item === "vest") item.armor = VEST_ARMOR;
+        this.state.items.set(String(this.nextItemId++), item);
       }
+    }
+  }
+
+  /** Put an item on the ground near (x, y), somewhere not inside a wall. */
+  private placeItem(item: GroundItem, x: number, y: number, droppedBy = "") {
+    for (let i = 0; i < 12; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const d = i === 0 ? 0 : 18 + Math.random() * 22;
+      const px = clamp(x + Math.cos(a) * d, 20, ARENA_SIZE - 20);
+      const py = clamp(y + Math.sin(a) * d, 20, ARENA_SIZE - 20);
+      if (!this.map.pointBlocked(px, py)) {
+        item.x = px;
+        item.y = py;
+        break;
+      }
+      item.x = x;
+      item.y = y;
+    }
+    item.droppedBy = droppedBy;
+    item.noAutoPickupUntil = droppedBy ? this.clock.currentTime + DROP_BLOCK_MS : 0;
+    this.state.items.set(String(this.nextItemId++), item);
+  }
+
+  /** G: drop a slot's weapon at your feet (with whatever ammo it has). */
+  private dropSlot(player: Player, playerId: string, index: number) {
+    const slot = player.slots[index];
+    if (!slot?.weapon) return;
+    const item = new GroundItem();
+    item.kind = "weapon";
+    item.weapon = slot.weapon;
+    item.ammo = slot.ammo;
+    item.reserve = slot.reserve;
+    const ahead = 26;
+    this.placeItem(item, player.x + Math.cos(player.angle) * ahead, player.y + Math.sin(player.angle) * ahead, playerId);
+    setSlot(slot, "");
+    if (index === player.active) {
+      player.reloading = false;
+      // Hold the next weapon you still have, if any.
+      for (let k = 1; k < SLOT_COUNT; k++) {
+        const j = (index + k) % SLOT_COUNT;
+        if (player.slots[j].weapon) {
+          player.active = j;
+          break;
+        }
+      }
+    }
+  }
+
+  /** On death (or leaving mid-match): everything you carried falls on the ground. */
+  private dropEverything(player: Player) {
+    player.slots.forEach((slot) => {
+      if (!slot.weapon) return;
+      const item = new GroundItem();
+      item.kind = "weapon";
+      item.weapon = slot.weapon;
+      item.ammo = slot.ammo;
+      item.reserve = slot.reserve;
+      this.placeItem(item, player.x, player.y);
+      setSlot(slot, "");
+    });
+    if (player.armor > 0) {
+      const vest = new GroundItem();
+      vest.kind = "vest";
+      vest.armor = player.armor;
+      this.placeItem(vest, player.x, player.y);
+      player.armor = 0;
+    }
+  }
+
+  /** Walking over items: take what fits without a choice. Full slots need E. */
+  private autoPickup(player: Player, playerId: string, now: number) {
+    this.state.items.forEach((item, id) => {
+      if (Math.hypot(item.x - player.x, item.y - player.y) > ITEM_REACH) return;
+      if (item.droppedBy === playerId && now < item.noAutoPickupUntil) return;
+      this.take(player, playerId, item, id, false);
     });
   }
+
+  /** E: the closest item in reach, swapping with the weapon in your hand if your slots are full. */
+  private manualPickup(player: Player, playerId: string) {
+    let best: { item: GroundItem; id: string; d: number } | null = null;
+    this.state.items.forEach((item, id) => {
+      const d = Math.hypot(item.x - player.x, item.y - player.y);
+      if (d <= ITEM_REACH + 10 && (!best || d < best.d)) best = { item, id, d };
+    });
+    if (best) {
+      const { item, id } = best;
+      this.take(player, playerId, item, id, true);
+    }
+  }
+
+  /** Try to take one item. `swap` = allowed to swap it with the weapon in hand (E). */
+  private take(player: Player, playerId: string, item: GroundItem, itemId: string, swap: boolean) {
+    if (item.kind === "medkit") {
+      // Heals right away; left on the ground if you're already at full health.
+      if (player.hp >= PLAYER_MAX_HP) return;
+      player.hp = Math.min(PLAYER_MAX_HP, player.hp + MEDKIT_HEAL);
+      this.state.items.delete(itemId);
+      return;
+    }
+
+    if (item.kind === "ammo") {
+      // Ammo box: feeds the gun in your hand, or else the first gun that needs it.
+      const order = [player.active, ...[0, 1, 2].filter((i) => i !== player.active)];
+      for (const i of order) {
+        const slot = player.slots[i];
+        const gun = gunStats(slot.weapon);
+        if (gun && slot.reserve < gun.maxReserve) {
+          slot.reserve = Math.min(gun.maxReserve, slot.reserve + gun.boxAmmo);
+          this.state.items.delete(itemId);
+          return;
+        }
+      }
+      return;
+    }
+
+    if (item.kind === "vest") {
+      if (item.armor <= player.armor && !swap) return; // only auto-take a better vest
+      if (player.armor > 0) {
+        const old = new GroundItem();
+        old.kind = "vest";
+        old.armor = player.armor;
+        this.placeItem(old, player.x, player.y, playerId);
+      }
+      player.armor = item.armor;
+      this.state.items.delete(itemId);
+      return;
+    }
+
+    // A weapon
+    const owned = player.slots.find((s) => s.weapon === item.weapon);
+    const gun = gunStats(item.weapon);
+    if (owned) {
+      // Same gun again: take its rounds as spare ammo.
+      if (!gun) return;
+      const space = gun.maxReserve - owned.reserve;
+      const take = Math.min(space, item.ammo + item.reserve);
+      if (take <= 0) return;
+      owned.reserve += take;
+      const fromReserve = Math.min(item.reserve, take);
+      item.reserve -= fromReserve;
+      item.ammo -= take - fromReserve;
+      if (item.ammo + item.reserve <= 0) this.state.items.delete(itemId);
+      return;
+    }
+
+    // A free slot? Prefer the one in hand if it's empty (fists).
+    const free = player.slots[player.active].weapon ? player.slots.findIndex((s) => !s.weapon) : player.active;
+    if (free >= 0) {
+      setSlot(player.slots[free], item.weapon, item.ammo, item.reserve);
+      if (!player.slots[player.active].weapon) player.active = free; // empty hands: hold it
+      this.state.items.delete(itemId);
+      return;
+    }
+    if (!swap) return; // slots full: only E swaps
+    // Swap: drop what's in hand, put the new weapon in that same slot, and hold it.
+    const hand = player.active;
+    this.dropSlot(player, playerId, hand);
+    setSlot(player.slots[hand], item.weapon, item.ammo, item.reserve);
+    player.active = hand;
+    player.reloading = false;
+    this.state.items.delete(itemId);
+  }
+
+  // ---------- Match flow ----------
+  //
+  //  warmup ──(2+ players)──▶ countdown 5s ──▶ live (no respawns, zone runs)
+  //     ▲                        │ (someone left, <2)          │ (≤1 alive)
+  //     └────────────────────────┘                              ▼
+  //     └──────────────── 8s winner banner ◀──────────────── ended
+
+  private updateMatch(now: number) {
+    const s = this.state;
+    const players = s.players.size;
+    s.aliveCount = this.countAlive();
+
+    switch (s.matchPhase) {
+      case "warmup":
+        if (players >= MATCH_MIN_PLAYERS) {
+          s.matchPhase = "countdown";
+          this.phaseEndsAt = now + MATCH_COUNTDOWN_MS;
+        }
+        break;
+
+      case "countdown":
+        if (players < MATCH_MIN_PLAYERS) {
+          s.matchPhase = "warmup";
+        } else if (now >= this.phaseEndsAt) {
+          this.startMatch(now);
+        }
+        break;
+
+      case "live":
+        if (s.aliveCount <= 1) this.endMatch(now);
+        break;
+
+      case "ended":
+        if (now >= this.phaseEndsAt) this.backToWarmup();
+        break;
+    }
+
+    s.phaseSecondsLeft =
+      s.matchPhase === "countdown" || s.matchPhase === "ended" ? Math.max(0, Math.ceil((this.phaseEndsAt - now) / 1000)) : 0;
+  }
+
+  private startMatch(now: number) {
+    const s = this.state;
+    s.matchPhase = "live";
+    s.winner = "";
+    this.matchStart = now;
+    s.matchSeconds = 0;
+    this.resetZone();
+    this.bullets = [];
+    this.newMap(); // a brand-new random map for every match
+    this.spawnLoot(); // and fresh loot (placed once; nothing respawns during the match)
+    // Everyone starts equal
+    s.players.forEach((p) => {
+      p.kills = 0;
+      p.deaths = 0;
+      p.place = 0;
+      this.respawn(p);
+    });
+    s.aliveCount = this.countAlive();
+    void this.lock(); // nobody joins a match in progress
+    console.log(`[${this.roomId}] match started with ${s.players.size} players`);
+  }
+
+  private endMatch(now: number) {
+    const s = this.state;
+    let winnerId = "";
+    s.players.forEach((p, id) => {
+      if (p.alive) {
+        winnerId = id;
+        p.place = 1;
+      }
+    });
+    s.winner = winnerId;
+    s.matchPhase = "ended";
+    this.phaseEndsAt = now + MATCH_END_MS;
+    this.bullets = [];
+    console.log(`[${this.roomId}] match over, winner: ${s.players.get(winnerId)?.name ?? "nobody"}`);
+  }
+
+  private backToWarmup() {
+    const s = this.state;
+    s.matchPhase = "warmup";
+    s.winner = "";
+    s.matchSeconds = 0;
+    this.resetZone();
+    s.players.forEach((p) => {
+      p.place = 0;
+      this.respawn(p);
+    });
+    void this.unlock();
+  }
+
+  /** Generate a random map and tell clients (they rebuild it from the same seed). */
+  private newMap() {
+    const seed = newMapSeed();
+    this.map = new GameMap(seed);
+    this.state.mapSeed = seed;
+    console.log(`[${this.roomId ?? "new room"}] map ${seed}: ${this.map.blockThemes.join(", ")}`);
+  }
+
+  private countAlive(): number {
+    let n = 0;
+    this.state.players.forEach((p) => {
+      if (p.alive) n++;
+    });
+    return n;
+  }
+
+  /** Zone back to "the whole map, nothing announced". */
+  private resetZone() {
+    const z = this.state.zone;
+    z.phase = "waiting";
+    z.x = 0;
+    z.y = 0;
+    z.size = ARENA_SIZE;
+    z.nextX = 0;
+    z.nextY = 0;
+    z.nextSize = 0;
+    z.secondsLeft = Math.ceil(zoneStartMs / 1000);
+  }
+
+  // ---------- Shrinking safe zone ----------
+  //
+  //  0:00 waiting (zone = whole map)
+  //  2:40 hold: first square announced (white outline), zone still the whole map
+  //  3:00 shrink: edges close in from the map border to that square, slowly
+  //       → hold 20s → shrink 10s → … → final
+
+  private updateZone(now: number) {
+    const z = this.state.zone;
+    const elapsed = now - this.matchStart;
+    this.state.matchSeconds = Math.floor(elapsed / 1000);
+
+    if (z.phase === "waiting") {
+      if (elapsed < zoneStartMs - zoneHoldMs) {
+        z.secondsLeft = Math.ceil((zoneStartMs - elapsed) / 1000);
+        return;
+      }
+      // Announce the first square; the shrink itself starts at zoneStartMs.
+      z.phase = "hold";
+      z.phaseStart = now;
+      z.phaseEnd = this.matchStart + zoneStartMs;
+      this.announceNext(Math.min(ZONE_START_SIZE, ARENA_SIZE));
+      console.log(`[${this.roomId}] first zone announced`);
+    }
+
+    if (z.phase === "hold" && now >= z.phaseEnd) {
+      // Start shrinking toward the already-announced next square.
+      z.phase = "shrink";
+      z.phaseStart = now;
+      z.phaseEnd = now + zoneShrinkMs;
+      z.fromX = z.x;
+      z.fromY = z.y;
+      z.fromSize = z.size;
+    }
+
+    if (z.phase === "shrink") {
+      const t = Math.min(1, (now - z.phaseStart) / zoneShrinkMs);
+      z.x = z.fromX + (z.nextX - z.fromX) * t;
+      z.y = z.fromY + (z.nextY - z.fromY) * t;
+      z.size = z.fromSize + (z.nextSize - z.fromSize) * t;
+      if (t >= 1) this.startHold(now);
+    }
+
+    z.secondsLeft = z.phase === "final" ? 0 : Math.max(0, Math.ceil((z.phaseEnd - now) / 1000));
+  }
+
+  /** Hold still for a while, and pick (and announce) the next, smaller square inside this one. */
+  private startHold(now: number) {
+    const z = this.state.zone;
+    if (z.size <= ZONE_MIN_SIZE + 0.5) {
+      z.phase = "final";
+      z.nextX = z.x;
+      z.nextY = z.y;
+      z.nextSize = z.size;
+      return;
+    }
+    z.phase = "hold";
+    z.phaseStart = now;
+    z.phaseEnd = now + zoneHoldMs;
+    this.announceNext(Math.max(ZONE_MIN_SIZE, z.size * ZONE_SHRINK_FACTOR));
+  }
+
+  /** Pick the next square (of `size`) at a random spot inside the current one. */
+  private announceNext(size: number) {
+    const z = this.state.zone;
+    z.nextSize = size;
+    z.nextX = z.x + Math.random() * (z.size - size);
+    z.nextY = z.y + Math.random() * (z.size - size);
+  }
+
+  private isOutsideZone(x: number, y: number): boolean {
+    const z = this.state.zone;
+    return x < z.x || y < z.y || x > z.x + z.size || y > z.y + z.size;
+  }
+
+  /** Where players respawn: inside the next safe square once one is announced. */
+  private spawnArea() {
+    const z = this.state.zone;
+    if (z.phase === "waiting") return { x: 0, y: 0, w: ARENA_SIZE, h: ARENA_SIZE };
+    return { x: z.nextX, y: z.nextY, w: z.nextSize, h: z.nextSize };
+  }
+}
+
+function setSlot(slot: WeaponSlot, weapon: string, ammo = 0, reserve = 0) {
+  slot.weapon = weapon;
+  slot.ammo = ammo;
+  slot.reserve = reserve;
 }
 
 function cleanText(value: unknown, maxLength: number): string {
   return typeof value === "string" ? value.trim().slice(0, maxLength) : "";
 }
 
+// Make sure every weapon in the loot table exists (catches typos at startup).
+for (const e of LOOT_TABLE) if (e.weapon && !WEAPONS[e.weapon]) throw new Error(`Unknown weapon in LOOT_TABLE: ${e.weapon}`);

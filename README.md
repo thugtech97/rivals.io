@@ -2,9 +2,19 @@
 
 A top-down 2D multiplayer shooter. Pick a name, browse live rooms, create your own room or Quick play, then fight in a square arena.
 
-**Controls:** WASD / arrow keys move · mouse aims · left click shoots (hold for auto fire) · R reloads · Esc leaves.
+**Controls:** WASD / arrow keys move · mouse aims · left click attacks (hold for auto fire) · 1 / 2 / 3 or mouse wheel switch weapons · R reloads · E picks up / swaps · G drops the weapon in hand · M mutes sound · Esc leaves. Sounds are synthesized in `client/src/sound.ts` (no audio files).
 
-**Rules:** 100 HP, 25 damage per bullet, 3s respawn. 15-round magazine, 45 spare rounds (max 90). Ammo crates (+30) spawn around the arena. All tunable in `shared/constants.ts`.
+**Weapons & items:** 3 weapon slots. Guns: pistol (everyone starts with one), rifle, machine gun, sniper. Melee: knife, sword, axe (fists when the slot is empty). A bulletproof vest (50 armor) soaks up 70% of bullet and melee damage until it breaks (not the zone). Medkits heal +40 HP. Ammo boxes feed the gun in your hand. Loot is placed **once** at match start; after that, items only appear when someone drops them (G) or dies. Walking over an item picks it up when you have room; with full slots, E swaps it for the weapon in hand. All stats live in `shared/weapons.ts`.
+
+**Matches (last soldier standing):** with 1 player a room is in warmup (practice, you respawn). Once 2+ players are in, a 5s countdown starts the match: everyone is reset, the room locks (no joining mid-match), and **there are no respawns**. Eliminated players spectate the survivors (click / Space / ← → to switch). The last player alive wins; after an 8s winner banner the room goes back to warmup and the next match starts.
+
+**Random maps:** every match gets a new map from a random seed (synced to clients). The 9 block themes (forest, town, farm, army camp, park, construction, industrial, market, ruins) are shuffled across the 3×3 city grid, each block is rotated/mirrored at random, trees are re-scattered and parked cars and barriers move. Layouts live in `shared/map.ts` (`THEMES`).
+
+**Safe zone:** the zone starts as the whole map. At 2:40 into a match the first safe square is announced (white outline); at 3:00 the red edge closes in slowly from the map border to it, then it holds 20s and shrinks again over 10s, down to a small final square. Touching the red costs 10 HP immediately and 10 more every second. For quick testing: `ZONE_START_MS=20000 npm run dev:server`.
+
+**Rules:** 100 HP (respawn after 3s only in warmup). Weapon damage, fire rate, magazines and ranges are in `shared/weapons.ts`; everything else in `shared/constants.ts`.
+
+**Testing hook:** starting the server with `TEST_HOOKS=1` enables a `debugTeleport` message used by automated tests. Never set it in production.
 
 **Stack:** TypeScript · [Phaser 4](https://phaser.io) (rendering/input) · [Colyseus 0.18](https://colyseus.io) (rooms, matchmaking, state sync) · Vite
 

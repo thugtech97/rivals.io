@@ -1,45 +1,63 @@
 import Phaser from "phaser";
 import { ARENA_SIZE } from "../../shared/constants";
 import {
-  OBSTACLES,
+  INTERSECTIONS,
   ROADS,
   ROAD_WIDTH,
   SIDEWALK_WIDTH,
   seededRandom,
   type CircleObstacle,
+  type GameMap,
   type RectObstacle,
 } from "../../shared/map";
 import { shade } from "./soldier";
 
+/** Decoration density is tuned per 2000×2000 area and scaled to the real map size. */
+const DENSITY = (ARENA_SIZE / 2000) ** 2;
+
 type G = Phaser.GameObjects.Graphics;
 
 /**
- * Draws the whole arena once into a texture (fast to render every frame).
+ * Draws the whole arena once into textures (fast to render every frame).
  * `resolution` > 1 bakes extra detail so it stays sharp when the camera zooms in.
  * Tree canopies go on a separate layer above the soldiers.
+ * Returns everything it created, so the map can be swapped for a new one.
  */
-export function renderMap(scene: Phaser.Scene, resolution: number) {
+export function renderMap(scene: Phaser.Scene, map: GameMap, resolution: number): Phaser.GameObjects.GameObject[] {
+  const created: Phaser.GameObjects.GameObject[] = [];
   const g = scene.add.graphics();
   g.setScale(resolution);
 
-  const rng = seededRandom(42);
+  const rng = seededRandom(map.seed);
   drawGrass(g, rng);
+  drawGrounds(g, map, rng);
   drawRoads(g);
-  drawShadows(g);
-  for (const o of OBSTACLES) {
+  drawShadows(g, map);
+  for (const o of map.obstacles) {
     if (o.kind === "rect") drawRect(g, o, rng);
     else if (o.style !== "tree") drawRound(g, o);
   }
 
-  const size = Math.ceil(ARENA_SIZE * resolution);
-  const rt = scene.add.renderTexture(0, 0, size, size).setOrigin(0, 0).setScale(1 / resolution).setDepth(0);
-  rt.draw(g, 0, 0);
-  rt.render();
+  // Bake into a grid of tiles: one texture for the whole map would exceed the
+  // 4096px texture limit many GPUs have.
+  const tiles = Math.ceil((ARENA_SIZE * resolution) / 2048);
+  const tileWorld = ARENA_SIZE / tiles;
+  const tilePx = Math.ceil(tileWorld * resolution) + 2; // +2px overlap hides seams
+  for (let ty = 0; ty < tiles; ty++) {
+    for (let tx = 0; tx < tiles; tx++) {
+      const wx = tx * tileWorld;
+      const wy = ty * tileWorld;
+      const rt = scene.add.renderTexture(wx, wy, tilePx, tilePx).setOrigin(0, 0).setScale(1 / resolution).setDepth(0);
+      rt.draw(g, -wx * resolution, -wy * resolution);
+      rt.render();
+      created.push(rt);
+    }
+  }
   g.destroy();
 
   // Canopies stay as live vector graphics (crisp, only a few hundred shapes).
   const canopy = scene.add.graphics().setDepth(30);
-  for (const o of OBSTACLES) if (o.kind === "circle" && o.style === "tree") drawTree(canopy, o, rng);
+  for (const o of map.obstacles) if (o.kind === "circle" && o.style === "tree") drawTree(canopy, o, rng);
 
   // Arena border wall
   const border = scene.add.graphics().setDepth(1);
@@ -47,6 +65,9 @@ export function renderMap(scene: Phaser.Scene, resolution: number) {
   border.strokeRect(-7, -7, ARENA_SIZE + 14, ARENA_SIZE + 14);
   border.lineStyle(3, 0x55504a, 1);
   border.strokeRect(-1, -1, ARENA_SIZE + 2, ARENA_SIZE + 2);
+
+  created.push(canopy, border);
+  return created;
 }
 
 // ---------- Ground ----------
@@ -56,7 +77,7 @@ function drawGrass(g: G, rng: () => number) {
   g.fillRect(0, 0, ARENA_SIZE, ARENA_SIZE);
 
   // Big soft patches of lighter / darker grass
-  for (let i = 0; i < 160; i++) {
+  for (let i = 0; i < 160 * DENSITY; i++) {
     const x = rng() * ARENA_SIZE;
     const y = rng() * ARENA_SIZE;
     const w = 80 + rng() * 220;
@@ -66,7 +87,7 @@ function drawGrass(g: G, rng: () => number) {
   }
 
   // Grass tufts
-  for (let i = 0; i < 1400; i++) {
+  for (let i = 0; i < 1400 * DENSITY; i++) {
     const x = rng() * ARENA_SIZE;
     const y = rng() * ARENA_SIZE;
     g.lineStyle(1.5, rng() < 0.5 ? 0x5f9a4a : 0x3b6130, 0.8);
@@ -77,7 +98,7 @@ function drawGrass(g: G, rng: () => number) {
 
   // Little flowers
   const flowerColors = [0xf2e86d, 0xffffff, 0xe78bd0, 0x9fc8ff];
-  for (let i = 0; i < 260; i++) {
+  for (let i = 0; i < 260 * DENSITY; i++) {
     const x = rng() * ARENA_SIZE;
     const y = rng() * ARENA_SIZE;
     g.fillStyle(flowerColors[Math.floor(rng() * flowerColors.length)], 0.9);
@@ -85,7 +106,7 @@ function drawGrass(g: G, rng: () => number) {
   }
 
   // Low bushes (decoration only: you can walk and shoot through them)
-  for (let i = 0; i < 70; i++) {
+  for (let i = 0; i < 70 * DENSITY; i++) {
     const x = rng() * ARENA_SIZE;
     const y = rng() * ARENA_SIZE;
     const r = 10 + rng() * 8;
@@ -95,14 +116,6 @@ function drawGrass(g: G, rng: () => number) {
     g.fillCircle(x, y, r);
     g.fillStyle(0x4f8a38, 1);
     g.fillCircle(x - r * 0.3, y - r * 0.3, r * 0.6);
-  }
-
-  // A dirt path through the forest
-  g.fillStyle(0x8a7350, 0.55);
-  for (let t = 0; t <= 1; t += 0.01) {
-    const x = 120 + t * 780;
-    const y = 820 - t * 600 + Math.sin(t * 9) * 50;
-    g.fillCircle(x, y, 18);
   }
 }
 
@@ -142,31 +155,39 @@ function drawRoads(g: G) {
   g.fillStyle(0x3b3e44, 1);
   for (const r of ROADS) g.fillRect(r.x, r.y, r.w, r.h);
 
-  const mid = ARENA_SIZE / 2;
-  const a = mid - ROAD_WIDTH / 2;
-  const b = mid + ROAD_WIDTH / 2;
+  const half = ROAD_WIDTH / 2;
+  const centers = [...new Set(INTERSECTIONS.map((p) => p.x))];
+  const inCrossing = (i: number) => centers.some((c) => i + 30 > c - half - 40 && i < c + half + 40);
 
-  // Dashed yellow center lines (skip the intersection)
+  // Dashed yellow center lines (skipping the crossroads)
   g.fillStyle(0xe2c044, 1);
-  for (let i = 10; i < ARENA_SIZE; i += 60) {
-    if (i + 30 > a - 40 && i < b + 40) continue;
-    g.fillRect(i, mid - 2, 30, 4);
-    g.fillRect(mid - 2, i, 4, 30);
+  for (const c of centers) {
+    for (let i = 10; i < ARENA_SIZE; i += 60) {
+      if (inCrossing(i)) continue;
+      g.fillRect(i, c - 2, 30, 4);
+      g.fillRect(c - 2, i, 4, 30);
+    }
   }
 
-  // Zebra crossings on all four sides of the crossroads
+  // Zebra crossings on all four sides of every crossroads
   g.fillStyle(0xe8e8e8, 0.9);
-  for (let i = a + 8; i < b - 8; i += 16) {
-    g.fillRect(i, a - 34, 9, 26); // north
-    g.fillRect(i, b + 8, 9, 26); // south
-    g.fillRect(a - 34, i, 26, 9); // west
-    g.fillRect(b + 8, i, 26, 9); // east
+  for (const p of INTERSECTIONS) {
+    const ax = p.x - half;
+    const bx = p.x + half;
+    const ay = p.y - half;
+    const by = p.y + half;
+    for (let i = 8; i < ROAD_WIDTH - 8; i += 16) {
+      g.fillRect(ax + i, ay - 34, 9, 26); // north
+      g.fillRect(ax + i, by + 8, 9, 26); // south
+      g.fillRect(ax - 34, ay + i, 26, 9); // west
+      g.fillRect(bx + 8, ay + i, 26, 9); // east
+    }
   }
 
   // Cracks and oil stains
   const rng = seededRandom(7);
-  for (let i = 0; i < 40; i++) {
-    const road = ROADS[i % 2];
+  for (let i = 0; i < 40 * DENSITY; i++) {
+    const road = ROADS[i % ROADS.length];
     const x = road.x + rng() * road.w;
     const y = road.y + rng() * road.h;
     g.fillStyle(0x2c2e33, 0.6);
@@ -174,9 +195,57 @@ function drawRoads(g: G) {
   }
 }
 
-function drawShadows(g: G) {
+function drawGrounds(g: G, map: GameMap, rng: () => number) {
+  for (const a of map.grounds) {
+    const { x, y, w, h } = a;
+    switch (a.kind) {
+      case "field": // ploughed crop rows
+        g.fillStyle(0x7a5c3a, 1);
+        g.fillRect(x, y, w, h);
+        for (let i = y + 6; i < y + h - 4; i += 18) {
+          g.fillStyle(0x5f4529, 1);
+          g.fillRect(x + 4, i, w - 8, 5);
+          g.fillStyle(0x6c9a3c, 1);
+          for (let j = x + 10; j < x + w - 10; j += 14) g.fillCircle(j + rng() * 4, i + 11, 3.5);
+        }
+        break;
+      case "gravel":
+        g.fillStyle(0x8f8676, 1);
+        g.fillRect(x, y, w, h);
+        for (let i = 0; i < (w * h) / 900; i++) {
+          g.fillStyle(rng() < 0.5 ? 0x7a7264 : 0xa39a88, 0.8);
+          g.fillCircle(x + rng() * w, y + rng() * h, 1.5 + rng() * 2);
+        }
+        break;
+      case "concrete":
+        g.fillStyle(0x84878b, 1);
+        g.fillRect(x, y, w, h);
+        g.lineStyle(1.5, 0x6f7276, 1);
+        for (let i = x; i <= x + w; i += 86) g.lineBetween(i, y, i, y + h);
+        for (let i = y; i <= y + h; i += 86) g.lineBetween(x, i, x + w, i);
+        for (let i = 0; i < 30; i++) {
+          g.fillStyle(0x5d6064, 0.45);
+          g.fillEllipse(x + rng() * w, y + rng() * h, 20 + rng() * 40, 10 + rng() * 20);
+        }
+        break;
+      case "paving":
+        g.fillStyle(0xb8a88a, 1);
+        g.fillRect(x, y, w, h);
+        g.lineStyle(1, 0x9c8d72, 1);
+        for (let row = 0, i = y; i <= y + h; i += 20, row++) {
+          g.lineBetween(x, i, x + w, i);
+          for (let j = x + (row % 2) * 20; j < x + w; j += 40) g.lineBetween(j, i, j, Math.min(i + 20, y + h));
+        }
+        g.lineStyle(4, 0x8a7c63, 1);
+        g.strokeRect(x, y, w, h);
+        break;
+    }
+  }
+}
+
+function drawShadows(g: G, map: GameMap) {
   g.fillStyle(0x000000, 0.25);
-  for (const o of OBSTACLES) {
+  for (const o of map.obstacles) {
     if (o.kind === "rect") {
       const off = o.style === "building" ? 10 : 5;
       g.fillRect(o.x + off, o.y + off, o.w, o.h);
@@ -350,10 +419,17 @@ function drawRect(g: G, o: RectObstacle, rng: () => number) {
       g.fillStyle(0x9c4b36, 1);
       g.fillRect(x, y, w, h);
       g.lineStyle(1, 0x6d3122, 1);
-      const rowH = h / 2;
+      // Two courses of bricks along the wall's length (either direction).
       for (let row = 0; row < 2; row++) {
-        g.lineBetween(x, y + row * rowH, x + w, y + row * rowH);
-        for (let i = x + (row ? 10 : 0); i < x + w; i += 20) g.lineBetween(i, y + row * rowH, i, y + (row + 1) * rowH);
+        if (horizontal) {
+          const rowH = h / 2;
+          g.lineBetween(x, y + row * rowH, x + w, y + row * rowH);
+          for (let i = x + (row ? 10 : 0); i < x + w; i += 20) g.lineBetween(i, y + row * rowH, i, y + (row + 1) * rowH);
+        } else {
+          const colW = w / 2;
+          g.lineBetween(x + row * colW, y, x + row * colW, y + h);
+          for (let i = y + (row ? 10 : 0); i < y + h; i += 20) g.lineBetween(x + row * colW, i, x + (row + 1) * colW, i);
+        }
       }
       g.lineStyle(1.5, 0x5a281b, 1);
       g.strokeRect(x, y, w, h);
@@ -387,15 +463,106 @@ function drawRect(g: G, o: RectObstacle, rng: () => number) {
       break;
     }
 
-    case "log": {
+    case "fence": {
+      // Two rails and posts
+      g.fillStyle(0x9c7146, 1);
+      if (horizontal) {
+        g.fillRect(x, y + 2, w, 3);
+        g.fillRect(x, y + h - 5, w, 3);
+      } else {
+        g.fillRect(x + 2, y, 3, h);
+        g.fillRect(x + w - 5, y, 3, h);
+      }
       g.fillStyle(0x6b4a2b, 1);
-      g.fillRoundedRect(x, y, w, h, h / 2);
+      const along = horizontal ? w : h;
+      for (let p = 0; p <= along - 10; p += 30) {
+        if (horizontal) g.fillRect(x + p, y, 10, h);
+        else g.fillRect(x, y + p, w, 10);
+      }
+      if (horizontal) g.fillRect(x + w - 10, y, 10, h);
+      else g.fillRect(x, y + h - 10, w, 10);
+      break;
+    }
+
+    case "hay": {
+      g.fillStyle(0xd8b44a, 1);
+      g.fillRoundedRect(x, y, w, h, 5);
+      g.lineStyle(1, 0xb08d2e, 1);
+      for (let i = x + 6; i < x + w - 3; i += 6) g.lineBetween(i, y + 3, i - 2, y + h - 3);
+      g.lineStyle(2.5, 0x8c5a2b, 1);
+      g.lineBetween(x + w * 0.3, y, x + w * 0.3, y + h);
+      g.lineBetween(x + w * 0.7, y, x + w * 0.7, y + h);
+      break;
+    }
+
+    case "pipe": {
+      g.fillStyle(0x5d6d7e, 1);
+      g.fillRect(x, y, w, h);
+      g.fillStyle(0x85929e, 1);
+      if (horizontal) g.fillRect(x, y + 5, w, h * 0.3);
+      else g.fillRect(x + 5, y, w * 0.3, h);
+      g.fillStyle(0x2c3e50, 1); // open ends
+      if (horizontal) {
+        g.fillEllipse(x + 4, y + h / 2, 8, h - 6);
+        g.fillEllipse(x + w - 4, y + h / 2, 8, h - 6);
+      } else {
+        g.fillEllipse(x + w / 2, y + 4, w - 6, 8);
+        g.fillEllipse(x + w / 2, y + h - 4, w - 6, 8);
+      }
+      g.lineStyle(1.5, 0x34495e, 1);
+      g.strokeRect(x, y, w, h);
+      break;
+    }
+
+    case "concrete": {
+      g.fillStyle(0xa7a9ac, 1);
+      g.fillRect(x, y, w, h);
+      g.fillStyle(0xbfc1c4, 1);
+      g.fillRect(x + 3, y + 3, w - 6, h * 0.35);
+      for (let i = 0; i < (w * h) / 300; i++) {
+        g.fillStyle(0x8e9093, 1);
+        g.fillCircle(x + 3 + rng() * (w - 6), y + 3 + rng() * (h - 6), 1.2);
+      }
+      g.lineStyle(1.5, 0x6e7073, 1);
+      g.strokeRect(x, y, w, h);
+      break;
+    }
+
+    case "stall": {
+      const c = o.color ?? 0xc0392b;
+      g.fillStyle(0x8a6239, 1); // wooden counter peeking out the front
+      g.fillRect(x + 4, y + h - 10, w - 8, 10);
+      // Striped awning
+      const stripes = 7;
+      for (let i = 0; i < stripes; i++) {
+        g.fillStyle(i % 2 ? 0xf4f1e8 : c, 1);
+        g.fillRect(x + (i * w) / stripes, y, w / stripes + 0.5, h - 8);
+      }
+      g.lineStyle(2, shade(c, 0.6), 1);
+      g.strokeRect(x, y, w, h - 8);
+      // Fruit on the counter
+      for (let i = x + 12; i < x + w - 8; i += 11) {
+        g.fillStyle([0xe74c3c, 0xf39c12, 0x27ae60][Math.floor(rng() * 3)], 1);
+        g.fillCircle(i, y + h - 5, 3.5);
+      }
+      break;
+    }
+
+    case "log": {
+      // Works lying either way (random maps rotate blocks).
+      const t = Math.min(w, h); // thickness
+      g.fillStyle(0x6b4a2b, 1);
+      g.fillRoundedRect(x, y, w, h, t / 2);
       g.lineStyle(1, 0x4d331c, 1);
-      for (let i = x + 10; i < x + w - 10; i += 14) g.lineBetween(i, y + 4, i + 8, y + h - 4);
+      if (horizontal) for (let i = x + 10; i < x + w - 10; i += 14) g.lineBetween(i, y + 4, i + 8, y + h - 4);
+      else for (let i = y + 10; i < y + h - 10; i += 14) g.lineBetween(x + 4, i, x + w - 4, i + 8);
+      // Cut end with rings
+      const ex = horizontal ? x + w - t / 2 : x + w / 2;
+      const ey = horizontal ? y + h / 2 : y + h - t / 2;
       g.fillStyle(0xb08a5a, 1);
-      g.fillCircle(x + w - h / 2, y + h / 2, h / 2 - 2);
+      g.fillCircle(ex, ey, t / 2 - 2);
       g.lineStyle(1, 0x7d5d38, 1);
-      g.strokeCircle(x + w - h / 2, y + h / 2, h / 4);
+      g.strokeCircle(ex, ey, t / 4);
       break;
     }
   }
@@ -423,6 +590,31 @@ function drawRound(g: G, o: CircleObstacle) {
       g.strokeCircle(x, y, r * 0.6);
       g.fillStyle(0x3a3a3a, 1);
       g.fillCircle(x + r * 0.35, y - r * 0.2, 2.5);
+      break;
+
+    case "silo":
+      g.fillStyle(0xa9b1b8, 1);
+      g.fillCircle(x, y, r);
+      g.lineStyle(2, 0x7f8a93, 1);
+      g.strokeCircle(x, y, r);
+      g.strokeCircle(x, y, r * 0.7);
+      g.strokeCircle(x, y, r * 0.4);
+      g.fillStyle(0xd0d6db, 1);
+      g.fillCircle(x - r * 0.3, y - r * 0.3, r * 0.2);
+      g.fillStyle(0x6e7880, 1);
+      g.fillCircle(x, y, 5);
+      break;
+
+    case "statue":
+      g.fillStyle(0x9a958c, 1); // plinth
+      g.fillCircle(x, y, r);
+      g.lineStyle(2, 0x6a665f, 1);
+      g.strokeCircle(x, y, r);
+      g.fillStyle(0x4f7a6e, 1); // bronze-green figure seen from above
+      g.fillEllipse(x, y, r * 1.0, r * 0.6);
+      g.fillCircle(x + r * 0.15, y, r * 0.28);
+      g.fillStyle(0x6f9d8f, 1);
+      g.fillCircle(x + r * 0.05, y - r * 0.08, r * 0.12);
       break;
 
     case "fountain":
