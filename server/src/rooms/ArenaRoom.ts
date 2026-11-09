@@ -945,9 +945,9 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
   // ---------- Shrinking safe zone ----------
   //
   //  0:00 waiting (zone = whole map)
-  //  2:40 hold: first square announced (white outline), zone still the whole map
-  //  3:00 shrink: edges close in from the map border to that square, slowly
-  //       → hold 20s → shrink 10s → … → final
+  //  2:20 hold: first square announced (white outline), zone still the whole map
+  //  2:30 shrink: edges close in from the map border to that square, slowly
+  //       → hold 10s → shrink 10s → … → final
 
   private updateZone(now: number) {
     const z = this.state.zone;

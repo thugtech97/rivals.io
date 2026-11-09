@@ -45,9 +45,9 @@ export const MATCH_END_MS = 8000;
 // ---------- Shrinking safe zone ----------
 
 /** The zone starts shrinking this long after the room starts. */
-export const ZONE_START_MS = 3 * 60_000; // 3 minutes
+export const ZONE_START_MS = 150_000; // 2:30
 /** After appearing (and after each shrink) the zone holds still this long... */
-export const ZONE_HOLD_MS = 20_000;
+export const ZONE_HOLD_MS = 10_000;
 /** ...then shrinks slowly over this long. */
 export const ZONE_SHRINK_MS = 10_000;
 /** First zone: a square this big (smaller than the whole map), placed at random. */

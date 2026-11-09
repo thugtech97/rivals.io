@@ -10,7 +10,7 @@ A top-down 2D multiplayer shooter. Pick a name, browse live rooms, create your o
 
 **Random maps:** every match gets a new map from a random seed (synced to clients). The 9 block themes (forest, town, farm, army camp, park, construction, industrial, market, ruins) are shuffled across the 3×3 city grid, each block is rotated/mirrored at random, trees are re-scattered and parked cars and barriers move. Layouts live in `shared/map.ts` (`THEMES`).
 
-**Safe zone:** the zone starts as the whole map. At 2:40 into a match the first safe square is announced (white outline); at 3:00 the red edge closes in slowly from the map border to it, then it holds 20s and shrinks again over 10s, down to a small final square. Touching the red costs 10 HP immediately and 10 more every second. For quick testing: `ZONE_START_MS=20000 npm run dev:server`.
+**Safe zone:** the zone starts as the whole map. At 2:20 into a match the first safe square is announced (white outline); at 2:30 the red edge closes in slowly from the map border to it, then it holds 10s and shrinks again over 10s, down to a small final square. Touching the red costs 10 HP immediately and 10 more every second. For quick testing: `ZONE_START_MS=20000 npm run dev:server`.
 
 **Rules:** 100 HP (respawn after 3s only in warmup). Weapon damage, fire rate, magazines and ranges are in `shared/weapons.ts`; everything else in `shared/constants.ts`.
 
