@@ -113,12 +113,20 @@ export class Hud {
   }
 
   /** The weapon in hand: name and ammo (gun = null for melee). */
-  setWeapon(name: string, gun: { ammo: number; reserve: number; mag: number } | null, reloading: boolean) {
+  setWeapon(name: string, gun: { ammo: number; reserve: number; mag: number; thrown?: boolean } | null, reloading: boolean) {
     if (!this.changed("weapon", `${name}:${gun?.ammo}:${gun?.reserve}:${reloading}`)) return;
     this.el.weaponName.textContent = name;
     this.el.ammoLine.hidden = !gun;
+    this.el.ammoLine.dataset.thrown = String(!!gun?.thrown);
     if (!gun) {
       this.el.ammoNote.textContent = name === "Fists" ? "Find a weapon!" : "Melee · click to swing";
+      return;
+    }
+    if (gun.thrown) {
+      // Grenades: just how many you have.
+      this.el.ammo.textContent = `×${gun.ammo + gun.reserve}`;
+      this.el.ammo.dataset.low = "false";
+      this.el.ammoNote.textContent = "Click to throw";
       return;
     }
     this.el.ammo.textContent = String(gun.ammo);
@@ -133,7 +141,7 @@ export class Hud {
           : "";
   }
 
-  /** The three weapon slots (null = hide, e.g. while dead). */
+  /** The weapon slots (null = hide, e.g. while dead). */
   setSlots(slots: SlotInfo[] | null) {
     const key = slots ? slots.map((s) => `${s.name}:${s.ammo}:${s.active}`).join("|") : "none";
     if (!this.changed("slots", key)) return;

@@ -1,5 +1,5 @@
 import { Room, type Client } from "colyseus";
-import { ArenaState, GroundItem, Player, WeaponSlot } from "../schema/ArenaState";
+import { ArenaState, Grenade, GroundItem, Player, WeaponSlot } from "../schema/ArenaState";
 import {
   ARENA_SIZE,
   DEFAULT_PLAYERS_PER_ROOM,
@@ -27,15 +27,18 @@ import {
   IDLE_KICK_MS,
 } from "../../../shared/constants";
 import { angleDelta, applyInput, clamp, isMoving, muzzlePosition, NO_INPUT, type InputState } from "../../../shared/movement";
-import type { BulletEndEvent, KillEvent, ShotEvent, SwingEvent } from "../../../shared/messages";
+import type { BulletEndEvent, ExplosionEvent, KillEvent, ShotEvent, SwingEvent } from "../../../shared/messages";
 import { GameMap, newMapSeed } from "../../../shared/map";
 import {
   BOOTS_DURATION_MS,
   BOOTS_SPEED_MUL,
+  GRENADE_BOUNCE,
+  GRENADE_FRICTION,
   gunStats,
   heldStats,
   LOOT_TABLE,
   MEDKIT_HEAL,
+  SELF_SPLASH_MUL,
   SLOT_COUNT,
   STARTING_WEAPON,
   VEST_ABSORB,
@@ -43,6 +46,7 @@ import {
   WEAPONS,
   type GunStats,
   type MeleeStats,
+  type SplashStats,
   type WeaponId,
 } from "../../../shared/weapons";
 
@@ -90,7 +94,11 @@ interface Bullet {
   vx: number;
   vy: number;
   expiresAt: number;
+  /** Rockets explode instead of hitting one target. */
+  splash?: SplashStats;
 }
+
+const SLOT_INDEXES = Array.from({ length: SLOT_COUNT }, (_, i) => i);
 
 const COLORS = [0xd9534f, 0x3fa7d6, 0xe0b84a, 0x5cb85c, 0x9b6cd1, 0xe8834a, 0x4a6fd9, 0xd65a9b];
 
@@ -142,7 +150,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       if (player) this.startReload(player);
     });
 
-    // Switch weapon slot (1 / 2 / 3 or mouse wheel)
+    // Switch weapon slot (1-5 or mouse wheel)
     this.onMessage("slot", (client, index: number) => {
       this.markActive(client.sessionId);
       const p = this.state.players.get(client.sessionId);
@@ -292,8 +300,10 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       if (input.fire && !player.reloading && now >= player.nextShotAt) {
         if (gun) {
           if (slot.ammo > 0) {
-            this.fire(sessionId, player, slot, gun, now);
-            if (slot.ammo === 0) this.startReload(player);
+            if (gun.thrown) this.throwGrenade(sessionId, player, slot, gun, now);
+            else this.fire(sessionId, player, slot, gun, now);
+            if (slot.ammo === 0 && slot.reserve === 0 && gun.thrown) setSlot(slot, ""); // last grenade thrown
+            else if (slot.ammo === 0) this.startReload(player);
           } else {
             this.startReload(player); // does nothing if there are no spare rounds either
           }
@@ -306,6 +316,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     });
 
     this.moveBullets(dtMs, now);
+    this.moveGrenades(dtMs, now);
     this.kickIdlePlayers(now);
     if (this.state.matchPhase === "warmup") this.replaceIdleHost(now);
   }
@@ -327,13 +338,16 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       vx: Math.cos(angle) * gun.bulletSpeed,
       vy: Math.sin(angle) * gun.bulletSpeed,
       expiresAt: now + gun.bulletLifeMs,
+      splash: gun.splash,
     };
 
     const shot: ShotEvent = { id: bullet.id, owner, weapon: bullet.weapon, x: bullet.x, y: bullet.y, angle };
     this.broadcast("shot", shot);
 
     // Pressed against a wall? The barrel is inside it, so the shot stops right there
-    // (no shooting through cover).
+    // (no shooting through cover). A rocket goes off in your face.
+    let freeX = player.x;
+    let freeY = player.y;
     for (let i = 1; i <= 5; i++) {
       const t = i / 5;
       const x = player.x + (muzzle.x - player.x) * t;
@@ -341,8 +355,11 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       if (this.map.pointBlocked(x, y)) {
         const end: BulletEndEvent = { id: bullet.id, x, y, hit: "" };
         this.broadcast("bulletEnd", end);
+        if (bullet.splash) this.explode(freeX, freeY, owner, bullet.weapon, bullet.splash, now);
         return;
       }
+      freeX = x;
+      freeY = y;
     }
 
     this.bullets.push(bullet);
@@ -358,8 +375,13 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       let hit = "";
       let armored = false;
       let gone = false;
+      // Last spot not inside a wall (a rocket explodes there, not inside the wall).
+      let freeX = b.x;
+      let freeY = b.y;
 
       for (let s = 0; s < steps && !gone; s++) {
+        freeX = b.x;
+        freeY = b.y;
         b.x += (b.vx * dt) / steps;
         b.y += (b.vy * dt) / steps;
 
@@ -378,8 +400,9 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
         this.state.players.forEach((target, targetId) => {
           if (gone || targetId === b.owner || !target.alive) return;
           if (Math.hypot(target.x - b.x, target.y - b.y) <= PLAYER_RADIUS) {
-            hit = targetId;
             gone = true;
+            if (b.splash) return; // the explosion below does the damage
+            hit = targetId;
             armored = this.hurt(target, targetId, b.owner, b.damage, now, b.weapon);
           }
         });
@@ -390,12 +413,90 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       if (gone) {
         const end: BulletEndEvent = { id: b.id, x: b.x, y: b.y, hit, armored };
         this.broadcast("bulletEnd", end);
+        if (b.splash) {
+          const inWall = this.map.pointBlocked(b.x, b.y) || b.x <= 0 || b.y <= 0 || b.x >= ARENA_SIZE || b.y >= ARENA_SIZE;
+          this.explode(inWall ? freeX : b.x, inWall ? freeY : b.y, b.owner, b.weapon, b.splash, now);
+        }
       } else {
         survivors.push(b);
       }
     }
 
     this.bullets = survivors;
+  }
+
+  // ---------- Explosives ----------
+
+  /** Throw a grenade from your hand in the direction you aim. */
+  private throwGrenade(owner: string, player: Player, slot: WeaponSlot, gun: GunStats, now: number) {
+    slot.ammo--;
+    player.nextShotAt = now + gun.fireMs;
+    const angle = player.angle + (Math.random() * 2 - 1) * gun.spread;
+    const hand = muzzlePosition(player, player.angle, gun.muzzle);
+    const g = new Grenade();
+    // Up against a wall: it drops at your feet instead of inside the wall.
+    const start = this.map.pointBlocked(hand.x, hand.y) ? { x: player.x, y: player.y } : hand;
+    g.x = start.x;
+    g.y = start.y;
+    g.owner = owner;
+    g.vx = Math.cos(angle) * gun.bulletSpeed;
+    g.vy = Math.sin(angle) * gun.bulletSpeed;
+    g.explodesAt = now + gun.bulletLifeMs;
+    this.state.grenades.set(String(this.nextBulletId++), g);
+  }
+
+  /** Grenades roll, slow down, bounce off walls and the map edge, then go off. */
+  private moveGrenades(dtMs: number, now: number) {
+    const dt = dtMs / 1000;
+    const stats = gunStats("grenade")!;
+    this.state.grenades.forEach((g, id) => {
+      if (now >= g.explodesAt) {
+        this.state.grenades.delete(id);
+        this.explode(g.x, g.y, g.owner, "grenade", stats.splash!, now);
+        return;
+      }
+      const speed = Math.hypot(g.vx, g.vy);
+      if (speed <= 0) return;
+      const slowed = Math.max(0, speed - GRENADE_FRICTION * dt) / speed;
+      g.vx *= slowed;
+      g.vy *= slowed;
+      const steps = Math.max(1, Math.ceil((speed * dt) / 6));
+      for (let i = 0; i < steps; i++) {
+        const nx = g.x + (g.vx * dt) / steps;
+        if (nx < 4 || nx > ARENA_SIZE - 4 || this.map.pointBlocked(nx, g.y)) g.vx = -g.vx * GRENADE_BOUNCE;
+        else g.x = nx;
+        const ny = g.y + (g.vy * dt) / steps;
+        if (ny < 4 || ny > ARENA_SIZE - 4 || this.map.pointBlocked(g.x, ny)) g.vy = -g.vy * GRENADE_BOUNCE;
+        else g.y = ny;
+      }
+    });
+  }
+
+  /** Boom: hurts everyone in the radius who isn't behind a wall (less the further away). */
+  private explode(x: number, y: number, owner: string, weapon: WeaponId, splash: SplashStats, now: number) {
+    const hurtList: { target: Player; id: string; damage: number }[] = [];
+    this.state.players.forEach((target, id) => {
+      if (!target.alive) return;
+      const dist = Math.max(0, Math.hypot(target.x - x, target.y - y) - PLAYER_RADIUS);
+      if (dist > splash.radius || !this.clearLine(x, y, target.x, target.y)) return;
+      let damage = splash.damage - (splash.damage - splash.minDamage) * (dist / splash.radius);
+      if (id === owner) damage *= SELF_SPLASH_MUL;
+      hurtList.push({ target, id, damage: Math.round(damage) });
+    });
+    // Tell clients first so the blast shows before any "kill" messages it causes.
+    const ev: ExplosionEvent = { x, y, radius: splash.radius, owner, weapon, hits: hurtList.map((h) => h.id) };
+    this.broadcast("explosion", ev);
+    for (const h of hurtList) this.hurt(h.target, h.id, owner, h.damage, now, weapon);
+  }
+
+  /** Nothing solid between two points (sampled every few pixels). */
+  private clearLine(x0: number, y0: number, x1: number, y1: number): boolean {
+    const steps = Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 10);
+    for (let i = 1; i < steps; i++) {
+      const t = i / steps;
+      if (this.map.pointBlocked(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)) return false;
+    }
+    return true;
   }
 
   /** Melee: hits everyone in reach, inside the swing's arc, with nothing solid in between. */
@@ -451,7 +552,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     this.dropEverything(target);
 
     const attacker = this.state.players.get(attackerId);
-    if (attacker) attacker.kills++;
+    if (attacker && attackerId !== targetId) attacker.kills++; // blowing yourself up isn't a kill
 
     const kill: KillEvent = { killer: attackerId, victim: targetId, weapon };
     this.broadcast("kill", kill);
@@ -619,11 +720,11 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
     if (item.kind === "ammo") {
       // Ammo box: feeds the gun in your hand, or else the first gun that needs it.
-      const order = [player.active, ...[0, 1, 2].filter((i) => i !== player.active)];
+      const order = [player.active, ...SLOT_INDEXES.filter((i) => i !== player.active)];
       for (const i of order) {
         const slot = player.slots[i];
         const gun = gunStats(slot.weapon);
-        if (gun && slot.reserve < gun.maxReserve) {
+        if (gun && gun.boxAmmo > 0 && slot.reserve < gun.maxReserve) {
           slot.reserve = Math.min(gun.maxReserve, slot.reserve + gun.boxAmmo);
           this.state.items.delete(itemId);
           return;
@@ -767,6 +868,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     s.matchSeconds = 0;
     this.resetZone();
     this.bullets = [];
+    this.state.grenades.clear();
     this.newMap(); // a brand-new random map for every match
     this.spawnLoot(s.players.size); // and fresh loot (placed once; nothing respawns during the match)
     // Everyone starts equal
@@ -794,6 +896,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     s.matchPhase = "ended";
     this.phaseEndsAt = now + MATCH_END_MS;
     this.bullets = [];
+    this.state.grenades.clear();
     console.log(`[${this.roomId}] match over, winner: ${s.players.get(winnerId)?.name ?? "nobody"}`);
   }
 

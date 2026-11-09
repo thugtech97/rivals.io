@@ -3,7 +3,7 @@ import { Callbacks, type Room } from "@colyseus/sdk";
 import { ARENA_SIZE, MATCH_MIN_PLAYERS, PICKUP_RADIUS, PLAYER_MAX_HP, PLAYER_RADIUS, RESPAWN_MS } from "../../shared/constants";
 import { sfx } from "./sound";
 import { angleDelta, applyInput, isMoving, muzzlePosition, NO_INPUT, type InputState } from "../../shared/movement";
-import type { BulletEndEvent, KillEvent, ShotEvent, SwingEvent } from "../../shared/messages";
+import type { BulletEndEvent, ExplosionEvent, KillEvent, ShotEvent, SwingEvent } from "../../shared/messages";
 import {
   createSoldier,
   drawHealthBar,
@@ -110,6 +110,9 @@ interface BulletView {
   bornAt: number;
   lifeMs: number;
   owner: string;
+  weapon: string;
+  /** Rockets: countdown to the next smoke puff. */
+  smokeInMs: number;
 }
 
 /** How long a tracer takes to slide from the on-screen gun tip onto the server's bullet path. */
@@ -157,6 +160,8 @@ export class GameScene extends Phaser.Scene {
   private views = new Map<string, PlayerView>();
   private bullets = new Map<number, BulletView>();
   private items = new Map<string, { obj: Phaser.GameObjects.Container; data: ItemData }>();
+  /** Thrown grenades (synced positions) and their blinking fuse light. */
+  private grenades = new Map<string, { obj: Phaser.GameObjects.Container; light: Phaser.GameObjects.Arc; data: { x: number; y: number }; bornAt: number }>();
   private itemLabel!: Phaser.GameObjects.Text;
 
   private myInput: InputState = { ...NO_INPUT };
@@ -215,6 +220,7 @@ export class GameScene extends Phaser.Scene {
     this.cameraTarget = "";
     this.bullets.clear();
     this.items.clear();
+    this.grenades.clear();
     this.lastSentKeys = "";
   }
 
@@ -227,7 +233,7 @@ export class GameScene extends Phaser.Scene {
     cam.setZoom(this.baseZoom());
 
     // Controls: WASD / arrows move, mouse aims, left click attacks, R reloads,
-    // 1/2/3 or the wheel switch weapons, G drops, E picks up / swaps.
+    // 1-5 or the wheel switch weapons, G drops, E picks up / swaps.
     const kb = this.input.keyboard!;
     const k = Phaser.Input.Keyboard.KeyCodes;
     this.keys = {
@@ -250,9 +256,9 @@ export class GameScene extends Phaser.Scene {
     this.hud.onStartMatch = () => this.room.send("startMatch");
     kb.on("keydown-G", () => this.room.send("drop"));
     kb.on("keydown-E", () => this.room.send("pickup"));
-    kb.on("keydown-ONE", () => this.selectSlot(0));
-    kb.on("keydown-TWO", () => this.selectSlot(1));
-    kb.on("keydown-THREE", () => this.selectSlot(2));
+    (["ONE", "TWO", "THREE", "FOUR", "FIVE"] as const)
+      .slice(0, SLOT_COUNT)
+      .forEach((key, i) => kb.on(`keydown-${key}`, () => this.selectSlot(i)));
     this.input.on("wheel", (_p: unknown, _o: unknown, _dx: number, dy: number) => this.cycleSlot(dy > 0 ? 1 : -1));
     kb.on("keydown-M", () => this.onMuteToggle?.(sfx.toggleMute()));
     // Spectator controls (only do anything while you're out of the match)
@@ -304,6 +310,12 @@ export class GameScene extends Phaser.Scene {
 
     $.onAdd("items", (item, key) => this.addItem(key as string, item as unknown as ItemData));
     $.onRemove("items", (_item, key) => this.removeItem(key as string));
+    $.onAdd("grenades", (g, key) => this.addGrenade(key as string, g as unknown as { x: number; y: number; owner: string }));
+    $.onRemove("grenades", (_g, key) => {
+      this.grenades.get(key as string)?.obj.destroy();
+      this.grenades.delete(key as string);
+    });
+    this.room.onMessage("explosion", (ev: ExplosionEvent) => this.explosionEffect(ev));
 
     this.room.onMessage("shot", (shot: ShotEvent) => this.spawnBullet(shot));
     this.room.onMessage("bulletEnd", (end: BulletEndEvent) => this.endBullet(end));
@@ -414,7 +426,8 @@ export class GameScene extends Phaser.Scene {
       }
     });
 
-    this.updateBullets(this.time.now);
+    this.updateBullets(this.time.now, delta);
+    this.updateGrenades(smoothing);
     this.drawZone(smoothing);
     this.updateCamera(mine);
     this.updateItemLabel(mine);
@@ -466,9 +479,10 @@ export class GameScene extends Phaser.Scene {
         if (this.lastHeld !== "" || slot.weapon !== "") sfx.equip(slot.weapon);
         this.lastHeld = slot.weapon;
       }
-      // Reload: magazine out when it starts, in + charge when it finishes.
-      if (d.reloading && !this.wasReloading) sfx.reloadStart();
-      if (!d.reloading && this.wasReloading && d.alive && slot.ammo > 0) sfx.reloadEnd();
+      // Reload: magazine out when it starts, in + charge when it finishes (not for grenades).
+      const thrown = !!gunStats(slot.weapon)?.thrown;
+      if (d.reloading && !this.wasReloading && !thrown) sfx.reloadStart();
+      if (!d.reloading && this.wasReloading && d.alive && slot.ammo > 0 && !thrown) sfx.reloadEnd();
       this.wasReloading = d.reloading;
       // Holding the trigger on a gun with no ammo at all: click… click…
       const gun = gunStats(slot.weapon);
@@ -731,14 +745,20 @@ export class GameScene extends Phaser.Scene {
       this.hud.setBoots(d.alive ? d.boots : 0);
       this.hud.setLowHealth(d.alive && d.hp <= LOW_HP);
 
-      // Weapon in hand + the three slots
+      // Weapon in hand + the weapon slots
       const held = slotOf(d, d.active);
       const gun = gunStats(held.weapon);
-      this.hud.setWeapon(heldStats(held.weapon).name, gun ? { ammo: held.ammo, reserve: held.reserve, mag: gun.mag } : null, d.reloading);
+      this.hud.setWeapon(
+        heldStats(held.weapon).name,
+        gun ? { ammo: held.ammo, reserve: held.reserve, mag: gun.mag, thrown: gun.thrown } : null,
+        d.reloading,
+      );
       const slots: SlotInfo[] = [];
       for (let i = 0; i < SLOT_COUNT; i++) {
         const sl = slotOf(d, i);
-        slots.push({ name: sl.weapon ? heldStats(sl.weapon).name : "", ammo: gunStats(sl.weapon) ? `${sl.ammo}/${sl.reserve}` : "", active: i === d.active });
+        const g = gunStats(sl.weapon);
+        const ammo = !g ? "" : g.thrown ? `×${sl.ammo + sl.reserve}` : `${sl.ammo}/${sl.reserve}`;
+        slots.push({ name: sl.weapon ? heldStats(sl.weapon).name : "", ammo, active: i === d.active });
       }
       this.hud.setSlots(d.alive ? slots : null);
       const prompt = d.alive ? this.pickupPrompt(d) : "";
@@ -800,9 +820,10 @@ export class GameScene extends Phaser.Scene {
     if (it.kind === "vest" && it.armor <= d.armor) return `E: swap your vest (${d.armor}) for this one (${it.armor})`;
     if (it.kind === "boots" && it.charge <= d.boots) return `E: swap your boots (${d.boots}%) for these (${it.charge}%)`;
     if (it.kind !== "weapon") return "";
-    const owned = [0, 1, 2].some((i) => slotOf(d, i).weapon === it.weapon);
+    const indexes = Array.from({ length: SLOT_COUNT }, (_, i) => i);
+    const owned = indexes.some((i) => slotOf(d, i).weapon === it.weapon);
     if (owned) return "";
-    const full = [0, 1, 2].every((i) => slotOf(d, i).weapon);
+    const full = indexes.every((i) => slotOf(d, i).weapon);
     const name = heldStats(it.weapon).name;
     if (full) return `E: swap your ${heldStats(slotOf(d, d.active).weapon).name} for the ${name}`;
     return `E: pick up ${name}`;
@@ -872,9 +893,15 @@ export class GameScene extends Phaser.Scene {
     const vx = Math.cos(shot.angle) * gun.bulletSpeed;
     const vy = Math.sin(shot.angle) * gun.bulletSpeed;
 
-    // Tracer: long and white for the sniper, thin for the machine gun
+    // Tracer: long and white for the sniper, thin for the machine gun, a fat rocket for the bazooka
     const look =
-      shot.weapon === "sniper" ? { len: 34, w: 3, c: 0xffffff } : shot.weapon === "mg" ? { len: 14, w: 2, c: 0xffd27a } : { len: 16, w: 3, c: 0xffe08a };
+      shot.weapon === "sniper"
+        ? { len: 34, w: 3, c: 0xffffff }
+        : shot.weapon === "mg"
+          ? { len: 14, w: 2, c: 0xffd27a }
+          : shot.weapon === "bazooka"
+            ? { len: 18, w: 7, c: 0x55603a }
+            : { len: 16, w: 3, c: 0xffe08a };
     // The server fired from where IT thinks the shooter is, but on screen we draw ourselves
     // ahead (prediction) and others behind (smoothing). Start the tracer and flash at the gun
     // tip as drawn, then let the tracer slide onto the real path (hits are still server-side).
@@ -902,16 +929,19 @@ export class GameScene extends Phaser.Scene {
       bornAt: this.time.now,
       lifeMs: gun.bulletLifeMs,
       owner: shot.owner,
+      weapon: shot.weapon,
+      smokeInMs: 0,
     });
     sfx.gunshot(startX, startY, shot.owner === this.room.sessionId, shot.weapon);
 
     // Muzzle flash (bigger for the sniper)
-    const flash = this.add.circle(startX, startY, shot.weapon === "sniper" ? 12 : shot.weapon === "pistol" ? 5 : 7, 0xfff1b0, 1).setDepth(25);
+    const flashSize = shot.weapon === "bazooka" ? 16 : shot.weapon === "sniper" ? 12 : shot.weapon === "pistol" ? 5 : 7;
+    const flash = this.add.circle(startX, startY, flashSize, 0xfff1b0, 1).setDepth(25);
     this.tweens.add({ targets: flash, scale: 0.2, alpha: 0, duration: 70, onComplete: () => flash.destroy() });
 
     // Recoil kick on the shooter
     if (shooter) {
-      const kick = shot.weapon === "sniper" ? 5 : 2;
+      const kick = shot.weapon === "bazooka" ? 7 : shot.weapon === "sniper" ? 5 : 2;
       const body = shooter.soldier.body;
       this.tweens.killTweensOf(body);
       body.setPosition(0, 0);
@@ -925,7 +955,7 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private updateBullets(time: number) {
+  private updateBullets(time: number, delta: number) {
     this.bullets.forEach((b, id) => {
       const age = time - b.bornAt;
       // Position on the server's path, plus the on-screen gap fading to zero (ease-out).
@@ -933,6 +963,15 @@ export class GameScene extends Phaser.Scene {
       const gap = (1 - t) * (1 - t);
       b.sprite.x = b.x0 + b.vx * (age / 1000) + b.offX * gap;
       b.sprite.y = b.y0 + b.vy * (age / 1000) + b.offY * gap;
+      // Rockets leave a smoke trail.
+      if (b.weapon === "bazooka") {
+        b.smokeInMs -= delta;
+        if (b.smokeInMs <= 0) {
+          b.smokeInMs = 28;
+          const puff = this.add.circle(b.sprite.x, b.sprite.y, 5 + Math.random() * 3, 0xb8bcc4, 0.5).setDepth(14);
+          this.tweens.add({ targets: puff, scale: 2.2, alpha: 0, duration: 650, onComplete: () => puff.destroy() });
+        }
+      }
       // Safety net in case the server's "bulletEnd" never arrives.
       if (time - b.bornAt > b.lifeMs + 500) {
         b.sprite.destroy();
@@ -948,6 +987,7 @@ export class GameScene extends Phaser.Scene {
       b.sprite.destroy();
       this.bullets.delete(end.id);
     }
+    if (b?.weapon === "bazooka") return; // the "explosion" message shows the blast
 
     const victim = end.hit ? this.views.get(end.hit) : undefined;
     if (victim) {
@@ -980,6 +1020,95 @@ export class GameScene extends Phaser.Scene {
         onComplete: () => p.destroy(),
       });
     }
+  }
+
+  // ---------- Explosives ----------
+
+  private addGrenade(id: string, data: { x: number; y: number; owner: string }) {
+    const shadow = this.add.ellipse(1.5, 2.5, 11, 8, 0x000000, 0.35);
+    const body = this.add.circle(0, 0, 5.5, 0x3f4a2a, 1).setStrokeStyle(1.2, 0x232a17, 1);
+    const shine = this.add.circle(-1.5, -1.5, 1.8, 0x6b7a48, 1);
+    const light = this.add.circle(0, -4.5, 1.8, 0xff3a2a, 1);
+    const obj = this.add.container(data.x, data.y, [shadow, body, shine, light]).setDepth(14);
+    this.grenades.set(id, { obj, light, data, bornAt: this.time.now });
+    sfx.grenadeThrow(data.x, data.y);
+    // The thrower's arm swings forward.
+    const arms = this.views.get(data.owner)?.soldier.arms;
+    if (arms) {
+      this.tweens.killTweensOf(arms);
+      arms.setRotation(0.9);
+      this.tweens.add({ targets: arms, rotation: 0, duration: 180, ease: "Cubic.easeOut" });
+    }
+  }
+
+  /** Follow the server's grenade positions; the fuse light blinks faster and faster. */
+  private updateGrenades(smoothing: number) {
+    const fuse = gunStats("grenade")!.bulletLifeMs;
+    this.grenades.forEach((g) => {
+      g.obj.x += (g.data.x - g.obj.x) * Math.min(1, smoothing * 2);
+      g.obj.y += (g.data.y - g.obj.y) * Math.min(1, smoothing * 2);
+      g.obj.rotation += (Math.hypot(g.data.x - g.obj.x, g.data.y - g.obj.y) > 0.5 ? 0.25 : 0);
+      const left = Math.max(0, 1 - (this.time.now - g.bornAt) / fuse);
+      const period = 80 + left * 320;
+      g.light.setVisible(Math.floor((this.time.now - g.bornAt) / period) % 2 === 0);
+    });
+  }
+
+  /** Flash, fireball, shock ring, smoke, debris, a scorch mark, a shake and a boom. */
+  private explosionEffect(ev: ExplosionEvent) {
+    const { x, y, radius } = ev;
+    const flash = this.add.circle(x, y, radius * 0.5, 0xfff4c2, 0.95).setDepth(27);
+    this.tweens.add({ targets: flash, scale: 1.7, alpha: 0, duration: 200, onComplete: () => flash.destroy() });
+    const fire = this.add.circle(x, y, radius * 0.38, 0xff7a1a, 0.9).setDepth(26);
+    this.tweens.add({ targets: fire, scale: 2.3, alpha: 0, duration: 420, ease: "Cubic.easeOut", onComplete: () => fire.destroy() });
+    const ring = this.add.circle(x, y, radius * 0.3).setStrokeStyle(4, 0xffd27a, 0.9).setDepth(26);
+    this.tweens.add({ targets: ring, scale: 1 / 0.3, alpha: 0, duration: 320, ease: "Cubic.easeOut", onComplete: () => ring.destroy() });
+    for (let i = 0; i < 10; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const d = radius * (0.2 + Math.random() * 0.5);
+      const smoke = this.add.circle(x, y, 10 + Math.random() * 10, Math.random() < 0.5 ? 0x5a5e66 : 0x8a8f99, 0.55).setDepth(25);
+      this.tweens.add({
+        targets: smoke,
+        x: x + Math.cos(a) * d,
+        y: y + Math.sin(a) * d,
+        scale: 2,
+        alpha: 0,
+        duration: 900 + Math.random() * 700,
+        ease: "Cubic.easeOut",
+        onComplete: () => smoke.destroy(),
+      });
+    }
+    for (let i = 0; i < 14; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const d = radius * (0.5 + Math.random() * 0.7);
+      const bit = this.add.circle(x, y, 1.5 + Math.random() * 2, Math.random() < 0.5 ? 0x2b2b2b : 0xffb347, 1).setDepth(26);
+      this.tweens.add({
+        targets: bit,
+        x: x + Math.cos(a) * d,
+        y: y + Math.sin(a) * d,
+        alpha: 0,
+        duration: 350 + Math.random() * 250,
+        ease: "Cubic.easeOut",
+        onComplete: () => bit.destroy(),
+      });
+    }
+    // Scorch mark on the ground, fading away slowly.
+    const scorch = this.add.circle(x, y, radius * 0.45, 0x1a1a1a, 0.45).setDepth(2);
+    this.tweens.add({ targets: scorch, alpha: 0, delay: 6000, duration: 4000, onComplete: () => scorch.destroy() });
+
+    // Shake the screen the closer you are.
+    const cam = this.cameras.main;
+    const dist = Math.hypot(cam.worldView.centerX - x, cam.worldView.centerY - y);
+    if (dist < 700) cam.shake(260, 0.014 * (1 - dist / 700));
+    sfx.explosion(x, y);
+
+    for (const id of ev.hits) {
+      const v = this.views.get(id);
+      if (!v) continue;
+      this.blood.bulletHit(v.soldier.root.x, v.soldier.root.y, Math.atan2(v.soldier.root.y - y, v.soldier.root.x - x));
+      v.lastBulletHitAt = this.time.now;
+    }
+    if (ev.owner === this.room.sessionId && ev.hits.some((id) => id !== ev.owner)) sfx.hitMarker();
   }
 
   // ---------- Melee ----------
@@ -1024,7 +1153,8 @@ export class GameScene extends Phaser.Scene {
     if (data.kind === "weapon") {
       // Draw the weapon centered, at a slight angle, like it was dropped.
       g.setRotation(-0.5);
-      const shift = data.weapon === "sword" || data.weapon === "axe" ? -30 : data.weapon === "sniper" ? -22 : -18;
+      const shift =
+        data.weapon === "sword" || data.weapon === "axe" ? -30 : data.weapon === "bazooka" ? -20 : data.weapon === "sniper" ? -22 : -18;
       drawWeaponShape(g, data.weapon as WeaponId, shift, -9);
     } else if (data.kind === "vest") {
       drawVestIcon(g);
@@ -1106,7 +1236,8 @@ export class GameScene extends Phaser.Scene {
     let text = "Ammo box";
     if (it.kind === "weapon") {
       const gun = gunStats(it.weapon);
-      text = heldStats(it.weapon).name + (gun ? ` · ${it.ammo}/${it.reserve}` : "");
+      if (gun?.thrown) text = `Grenades ×${it.ammo + it.reserve}`;
+      else text = heldStats(it.weapon).name + (gun ? ` · ${it.ammo}/${it.reserve}` : "");
     } else if (it.kind === "vest") text = `Vest · ${it.armor}`;
     else if (it.kind === "boots") text = `Speed boots · ${it.charge}%`;
     else if (it.kind === "medkit") text = `Medkit +${MEDKIT_HEAL}${mine!.data.hp >= PLAYER_MAX_HP ? " (full HP)" : ""}`;

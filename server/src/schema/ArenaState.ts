@@ -1,5 +1,6 @@
 import { Schema, MapSchema, ArraySchema, type } from "@colyseus/schema";
 import { PLAYER_MAX_HP } from "../../../shared/constants";
+import { SLOT_COUNT } from "../../../shared/weapons";
 
 /** One inventory slot. weapon "" = empty (you fight with your fists). */
 export class WeaponSlot extends Schema {
@@ -32,7 +33,7 @@ export class Player extends Schema {
   /** Speed boots charge left, 0-100 % (0 = no boots). */
   @type("number") boots = 0;
   /** Inventory: SLOT_COUNT weapon slots, and which one is in hand. */
-  @type([WeaponSlot]) slots = new ArraySchema<WeaponSlot>(new WeaponSlot(), new WeaponSlot(), new WeaponSlot());
+  @type([WeaponSlot]) slots = new ArraySchema<WeaponSlot>(...Array.from({ length: SLOT_COUNT }, () => new WeaponSlot()));
   @type("number") active = 0;
   @type("boolean") reloading = false;
 
@@ -67,6 +68,18 @@ export class GroundItem extends Schema {
   // Server-only: whoever dropped it doesn't instantly auto-pick it back up.
   droppedBy = "";
   noAutoPickupUntil = 0;
+}
+
+/** A thrown grenade rolling around (synced so everyone sees the same bounces). */
+export class Grenade extends Schema {
+  @type("number") x = 0;
+  @type("number") y = 0;
+  @type("string") owner = "";
+
+  // Server-only
+  vx = 0;
+  vy = 0;
+  explodesAt = 0;
 }
 
 /**
@@ -122,4 +135,5 @@ export class ArenaState extends Schema {
   /** Keyed by the client's sessionId. */
   @type({ map: Player }) players = new MapSchema<Player>();
   @type({ map: GroundItem }) items = new MapSchema<GroundItem>();
+  @type({ map: Grenade }) grenades = new MapSchema<Grenade>();
 }

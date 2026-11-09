@@ -981,6 +981,10 @@ kbd {
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
+#ammo-line[data-thrown="true"] .sep,
+#ammo-line[data-thrown="true"] .res {
+  display: none;
+}
 #ammo-line[hidden] {
   display: none !important;
 }
@@ -997,7 +1001,7 @@ kbd {
   gap: 8px;
 }
 .weapon-slots li {
-  min-width: 112px;
+  min-width: 96px;
   padding: 6px 10px;
   display: flex;
   align-items: baseline;
@@ -1047,6 +1051,18 @@ kbd {
 .kill-weapon {
   color: var(--muted);
   font-size: 12px;
+}
+
+/* Five slots: tighter on mid-size screens so they don't run into the HP / ammo panels. */
+@media (max-width: 1100px) {
+  .weapon-slots {
+    gap: 5px;
+  }
+  .weapon-slots li {
+    min-width: 0;
+    padding: 5px 7px;
+    font-size: 12px;
+  }
 }
 
 /* The death panel sits above the weapon slots */

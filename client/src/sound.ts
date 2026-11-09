@@ -12,6 +12,7 @@ const GUN_VOICES: Record<string, { crack: number; body: number; thump: number; d
   rifle: { crack: 2500, body: 2600, thump: 140, decay: 0.14, vol: 1, reach: 1 },
   mg: { crack: 2200, body: 2200, thump: 120, decay: 0.1, vol: 0.85, reach: 1.05 },
   sniper: { crack: 1800, body: 1800, thump: 80, decay: 0.32, vol: 1.25, reach: 1.6 },
+  bazooka: { crack: 900, body: 1400, thump: 70, decay: 0.4, vol: 1.1, reach: 1.4 },
 };
 
 export class Sfx {
@@ -91,6 +92,30 @@ export class Sfx {
     this.env(osc, node, t, 0.9, v.decay);
     // The sniper's shot rolls on for a moment
     if (weapon === "sniper") this.noiseHit(node, t + 0.06, { type: "lowpass", freq: 500, vol: 0.5, decay: 0.5, sweepTo: 150 });
+    // The rocket's whoosh as it leaves the tube
+    if (weapon === "bazooka") this.noiseHit(node, t + 0.03, { type: "bandpass", freq: 700, vol: 0.8, decay: 0.6, sweepTo: 2400 });
+  }
+
+  /** A rocket or grenade going off: a big boom that carries far. */
+  explosion(x: number, y: number) {
+    const out = this.at(x, y, 1, 2.2);
+    if (!out) return;
+    const { ctx, node, t } = out;
+    const far = this.distance(x, y) / (HEAR_MAX * 2.2);
+    this.noiseHit(node, t, { type: "highpass", freq: 1400, vol: 0.6 * (1 - far), decay: 0.1 }); // crack
+    this.noiseHit(node, t, { type: "lowpass", freq: 2600 - far * 2000, vol: 1, decay: 1.1, sweepTo: 90 }); // blast
+    this.noiseHit(node, t + 0.15, { type: "lowpass", freq: 400, vol: 0.5, decay: 1.2, sweepTo: 60 }); // rumble
+    const osc = ctx.createOscillator();
+    osc.frequency.setValueAtTime(95, t);
+    osc.frequency.exponentialRampToValueAtTime(28, t + 0.7);
+    this.env(osc, node, t, 1, 0.8);
+  }
+
+  /** Grenade thrown: a quick whoosh. */
+  grenadeThrow(x: number, y: number) {
+    const out = this.at(x, y, 0.25);
+    if (!out) return;
+    this.noiseHit(out.node, out.t, { type: "bandpass", freq: 700, vol: 1, decay: 0.16, sweepTo: 2000 });
   }
 
   /** Melee whoosh: shorter for a knife, heavier for an axe. */

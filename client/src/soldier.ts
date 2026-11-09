@@ -182,6 +182,8 @@ const GRIP: Record<WeaponId, [[number, number], [number, number]]> = {
   rifle: [[10, 9], [22, 5]],
   mg: [[10, 11], [26, 6]],
   sniper: [[10, 9], [25, 5]],
+  bazooka: [[12, 11], [26, 9]],
+  grenade: [[17, 11], [6, -12]],
   knife: [[17, 11], [6, -12]],
   sword: [[15, 11], [4, -13]],
   axe: [[12, 10], [26, 10]],
@@ -191,7 +193,7 @@ const GRIP: Record<WeaponId, [[number, number], [number, number]]> = {
 function drawArmsWithWeapon(g: G, id: WeaponId, color: number) {
   const [right, left] = GRIP[id] ?? GRIP.fists;
   // Two-handed guns sit under the arms; blades are drawn on top of the hand holding them.
-  const gunFirst = id === "pistol" || id === "rifle" || id === "mg" || id === "sniper";
+  const gunFirst = id === "pistol" || id === "rifle" || id === "mg" || id === "sniper" || id === "bazooka";
   if (gunFirst) drawWeaponShape(g, id, 0, 0);
   drawArms(g, color, right, left);
   if (!gunFirst && id !== "fists") drawWeaponShape(g, id, 0, 0);
@@ -241,6 +243,28 @@ export function drawWeaponShape(g: G, id: WeaponId, ox: number, oy: number) {
       g.fillStyle(0x6fb8ff, 0.9);
       r(22, 0.5, 1.5, 2.5); // lens glint
       break;
+    case "bazooka":
+      g.fillStyle(0x3d4728, 1);
+      r(-8, 2, 54, 9); // launch tube on the shoulder
+      g.fillStyle(0x2c331d, 1);
+      r(-10, 1, 4, 11); // rear flare
+      r(44, 1, 4, 11); // front ring
+      g.fillStyle(GUN_DARK, 1);
+      r(14, 10, 4, 6); // grip
+      r(22, -1, 6, 3); // sight
+      g.fillStyle(0xd9a441, 1);
+      r(2, 5, 6, 3); // warning stripe
+      break;
+    case "grenade":
+      g.fillStyle(0x3f4a2a, 1);
+      g.fillCircle(ox + 21, oy + 11, 5.5);
+      g.fillStyle(0x56633a, 1);
+      g.fillCircle(ox + 19.5, oy + 9.5, 2);
+      g.fillStyle(GUN_METAL, 1);
+      r(18, 4, 6, 2.5); // lever
+      g.lineStyle(1.2, 0xc9ced6, 1);
+      g.strokeCircle(ox + 26, oy + 5, 2); // pin ring
+      break;
     case "knife":
       g.fillStyle(0x2a2a2a, 1);
       r(14, 9, 7, 4); // handle
@@ -279,7 +303,10 @@ export function itemGlow(kind: string, weapon: string): number {
   if (kind === "vest") return 0x5aa9ff;
   if (kind === "boots") return 0x4fe0b6;
   if (kind === "ammo") return 0xd9a441;
-  return ({ sniper: 0xffc94a, mg: 0xc07aff, rifle: 0x63b3ff, pistol: 0xc9ced6 } as Record<string, number>)[weapon] ?? 0x7ee08a;
+  return (
+    ({ sniper: 0xffc94a, mg: 0xc07aff, rifle: 0x63b3ff, pistol: 0xc9ced6, bazooka: 0xff7a3a, grenade: 0xff7a3a } as Record<string, number>)[weapon] ??
+    0x7ee08a
+  );
 }
 
 /** A vest lying on the ground (icon). */

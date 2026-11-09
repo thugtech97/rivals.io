@@ -1,7 +1,7 @@
 // Every weapon's stats, shared by server (rules) and client (HUD, visuals, sounds).
 // Tweak numbers here to balance the game.
 
-export type GunId = "pistol" | "rifle" | "mg" | "sniper";
+export type GunId = "pistol" | "rifle" | "mg" | "sniper" | "bazooka" | "grenade";
 export type MeleeId = "knife" | "sword" | "axe" | "fists";
 export type WeaponId = GunId | MeleeId;
 
@@ -28,6 +28,20 @@ export interface GunStats {
   moveMul: number;
   /** How far in front of the soldier the barrel ends. */
   muzzle: number;
+  /** Explodes (rocket / grenade) instead of hitting one target. */
+  splash?: SplashStats;
+  /**
+   * Thrown (grenades): bulletSpeed is the throw speed, bulletLifeMs the fuse. It bounces off
+   * walls, rolls to a stop and goes off. Each "round" is one grenade; no reload sounds.
+   */
+  thrown?: boolean;
+}
+
+/** Explosion: full `damage` at the center down to `minDamage` at the edge of `radius`. Walls block it. */
+export interface SplashStats {
+  radius: number;
+  damage: number;
+  minDamage: number;
 }
 
 export interface MeleeStats {
@@ -61,13 +75,33 @@ export const WEAPONS: Record<WeaponId, WeaponStats> = {
     kind: "gun", name: "Sniper", damage: 80, fireMs: 1100, mag: 5, lootReserve: 10, maxReserve: 20, boxAmmo: 10,
     reloadMs: 2300, bulletSpeed: 2200, bulletLifeMs: 650, spread: 0, moveMul: 0.9, muzzle: 48,
   },
+  // Slow rocket that explodes on whatever it hits (or at the end of its range).
+  bazooka: {
+    kind: "gun", name: "Bazooka", damage: 95, fireMs: 900, mag: 1, lootReserve: 3, maxReserve: 5, boxAmmo: 1,
+    reloadMs: 2200, bulletSpeed: 560, bulletLifeMs: 1400, spread: 0.01, moveMul: 0.85, muzzle: 46,
+    splash: { radius: 120, damage: 95, minDamage: 25 },
+  },
+  // Thrown: bounces off walls, rolls to a stop, explodes when the fuse runs out.
+  // Ground pickups are 2 grenades (1 + 1 spare); you can carry 4. Ammo boxes don't give grenades.
+  grenade: {
+    kind: "gun", name: "Grenade", damage: 85, fireMs: 650, mag: 1, lootReserve: 1, maxReserve: 3, boxAmmo: 0,
+    reloadMs: 250, bulletSpeed: 760, bulletLifeMs: 1600, spread: 0.04, moveMul: 1, muzzle: 20,
+    splash: { radius: 130, damage: 85, minDamage: 20 }, thrown: true,
+  },
   knife: { kind: "melee", name: "Knife", damage: 30, range: 26, arc: 1.4, swingMs: 350, moveMul: 1.05 },
   sword: { kind: "melee", name: "Sword", damage: 45, range: 48, arc: 2.2, swingMs: 650, moveMul: 1 },
   axe: { kind: "melee", name: "Axe", damage: 60, range: 38, arc: 1.6, swingMs: 900, moveMul: 0.95 },
   fists: { kind: "melee", name: "Fists", damage: 12, range: 18, arc: 1.4, swingMs: 400, moveMul: 1.05 },
 };
 
-export const SLOT_COUNT = 3;
+export const SLOT_COUNT = 5;
+
+/** Your own rocket / grenade hurts you too, but only this much. */
+export const SELF_SPLASH_MUL = 0.5;
+/** A thrown grenade slows down by this much (px/s every second) as it rolls. */
+export const GRENADE_FRICTION = 900;
+/** Speed kept (and reversed) when a grenade bounces off a wall. */
+export const GRENADE_BOUNCE = 0.45;
 
 /** Bulletproof vest: armor points, and how much of each hit (bullets & melee) it soaks up. */
 export const VEST_ARMOR = 50;
@@ -104,6 +138,8 @@ export const LOOT_TABLE: {
   { item: "weapon", weapon: "knife", count: 3 },
   { item: "weapon", weapon: "sword", count: 2 },
   { item: "weapon", weapon: "axe", count: 2 },
+  { item: "weapon", weapon: "bazooka", count: 2 },
+  { item: "weapon", weapon: "grenade", count: 6 },
   { item: "vest", count: 5 },
   { item: "boots", count: 4 },
   { item: "ammo", count: 10, perPlayer: 3 }, // 2 players: 16 boxes, 4: 22, 8: 34, 16: 58

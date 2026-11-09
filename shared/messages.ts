@@ -39,3 +39,14 @@ export interface KillEvent {
   victim: string; // sessionId
   weapon: WeaponId | "zone";
 }
+
+/** "explosion": a rocket or grenade went off. Damage is already applied (synced state). */
+export interface ExplosionEvent {
+  x: number;
+  y: number;
+  radius: number;
+  owner: string;
+  weapon: WeaponId;
+  /** sessionIds of everyone it hurt (the owner too, if they were in it). */
+  hits: string[];
+}
