@@ -224,7 +224,7 @@ export class Sfx {
     this.noiseHit(out.node, out.t + 0.01, { type: "bandpass", freq: 1800, vol: 0.12, decay: 0.03 }); // grit
   }
 
-  /** Someone picked something up (kind: weapon | ammo | vest | medkit). */
+  /** Someone picked something up (kind: weapon | ammo | vest | medkit | boots). */
   pickup(x: number, y: number, mine: boolean, kind = "ammo") {
     const out = mine ? this.ui(0.5) : this.at(x, y, 0.35);
     if (!out) return;
@@ -234,13 +234,16 @@ export class Sfx {
       this.noiseHit(node, t + 0.1, { type: "bandpass", freq: 1500, vol: 0.5, decay: 0.08 }); // velcro
     } else if (kind === "medkit") {
       this.noiseHit(node, t, { type: "bandpass", freq: 3000, vol: 0.4, decay: 0.08 }); // bandage rip
+    } else if (kind === "boots") {
+      this.noiseHit(node, t, { type: "lowpass", freq: 1200, vol: 0.6, decay: 0.06 }); // laces pulled
+      this.noiseHit(node, t + 0.06, { type: "bandpass", freq: 1800, vol: 0.4, decay: 0.05 });
     } else {
       this.noiseHit(node, t, { type: "highpass", freq: 2200, vol: 0.7, decay: 0.03 }); // clack
       this.noiseHit(node, t + 0.07, { type: "highpass", freq: 2600, vol: 0.6, decay: 0.03 });
     }
     if (!mine) return;
     // Little chime for your own pickup (a soft rising "heal" for medkits)
-    const notes = kind === "medkit" ? [523, 659, 784] : [660, 990];
+    const notes = kind === "medkit" ? [523, 659, 784] : kind === "boots" ? [587, 880, 1175] : [660, 990];
     notes.forEach((f, i) => {
       const osc = ctx.createOscillator();
       osc.type = kind === "medkit" ? "sine" : "triangle";

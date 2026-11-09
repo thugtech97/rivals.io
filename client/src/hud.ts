@@ -46,14 +46,20 @@ export class Hud {
     armorRow: $("armor-row"),
     armorFill: $("armor-fill"),
     armorText: $("armor-text"),
+    bootsRow: $("boots-row"),
+    bootsFill: $("boots-fill"),
+    bootsText: $("boots-text"),
     weaponName: $("weapon-name"),
     ammoLine: $("ammo-line"),
     slots: $("weapon-slots"),
     prompt: $("pickup-prompt"),
+    startMatch: $("start-match") as HTMLButtonElement,
   };
   private last: Record<string, string> = {};
   /** Touch screens: tapping a weapon slot selects it. */
   onSlotTap?: (index: number) => void;
+  /** The host pressed "Start match". */
+  onStartMatch?: () => void;
 
   constructor() {
     this.el.slots.addEventListener("pointerdown", (e) => {
@@ -62,6 +68,10 @@ export class Hud {
       e.preventDefault();
       this.onSlotTap([...this.el.slots.children].indexOf(li));
     });
+    this.el.startMatch.onclick = () => {
+      this.el.startMatch.blur(); // so Space / Enter don't press it again
+      this.onStartMatch?.();
+    };
   }
   readonly minimap = new Minimap($("minimap") as HTMLCanvasElement);
 
@@ -78,6 +88,7 @@ export class Hud {
     this.el.lowHp.classList.remove("show");
     this.el.hurtFlash.classList.remove("show");
     this.el.banner.hidden = true;
+    this.el.startMatch.hidden = true;
     this.el.prompt.hidden = true;
   }
 
@@ -91,6 +102,14 @@ export class Hud {
     this.el.armorRow.hidden = armor <= 0;
     this.el.armorFill.style.width = `${Math.min(100, (armor / VEST_ARMOR) * 100)}%`;
     this.el.armorText.textContent = String(armor);
+  }
+
+  /** Speed boots charge (0-100 %, 0 hides the bar). */
+  setBoots(pct: number) {
+    if (!this.changed("boots", pct)) return;
+    this.el.bootsRow.hidden = pct <= 0;
+    this.el.bootsFill.style.width = `${Math.min(100, pct)}%`;
+    this.el.bootsText.textContent = `${pct}%`;
   }
 
   /** The weapon in hand: name and ammo (gun = null for melee). */
@@ -192,6 +211,13 @@ export class Hud {
     if (!this.changed("zoneInfo", `${text}:${urgent}`)) return;
     this.el.zoneInfo.textContent = text;
     this.el.zoneInfo.dataset.urgent = String(urgent);
+  }
+
+  /** The host's "Start match" button (null hides it). */
+  setStartButton(label: string | null) {
+    if (!this.changed("startMatch", label)) return;
+    this.el.startMatch.hidden = label === null;
+    this.el.startMatch.textContent = label ?? "";
   }
 
   /** Big center banner (match winner). Pass null to hide it. */

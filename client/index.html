@@ -85,7 +85,7 @@
         <span><kbd>WASD</kbd> move</span>
         <span><kbd>Mouse</kbd> aim &amp; shoot</span>
         <span><kbd>E</kbd> loot</span>
-        <span>🔫 7 weapons · 🛡️ vests · ➕ medkits</span>
+        <span>🔫 7 weapons · 🛡️ vests · 👟 speed boots · ➕ medkits</span>
         <span>🟥 stay out of the red zone</span>
       </footer>
     </main>
@@ -166,6 +166,7 @@
       <canvas id="minimap" class="minimap"></canvas>
 
       <div id="zone-info" class="zone-info"></div>
+      <button id="start-match" class="btn btn-primary btn-small start-match" hidden></button>
       <div id="zone-warning" class="zone-warning" hidden>⚠ Outside the safe zone: −10 HP every second!</div>
 
       <div class="panel health">
@@ -178,6 +179,11 @@
           <span class="label">🛡</span>
           <div class="hp-bar armor-bar"><div id="armor-fill" class="armor-fill"></div></div>
           <span id="armor-text" class="hp-text">0</span>
+        </div>
+        <div id="boots-row" class="bar-row" hidden>
+          <span class="label">👟</span>
+          <div class="hp-bar boots-bar"><div id="boots-fill" class="boots-fill"></div></div>
+          <span id="boots-text" class="hp-text">0%</span>
         </div>
       </div>
 

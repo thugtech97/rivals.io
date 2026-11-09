@@ -801,6 +801,18 @@ kbd {
   font-weight: 600;
   white-space: nowrap;
 }
+.start-match {
+  position: absolute;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: auto;
+  white-space: nowrap;
+}
+.start-match:hover:not(:disabled),
+.start-match:active:not(:disabled) {
+  transform: translateX(-50%);
+}
 .zone-info:empty {
   display: none;
 }
@@ -952,6 +964,14 @@ kbd {
   height: 100%;
   background: #5aa9ff;
   transition: width 0.15s ease-out;
+}
+.boots-bar {
+  height: 7px;
+}
+.boots-fill {
+  height: 100%;
+  background: #4fe0b6;
+  transition: width 0.15s linear;
 }
 
 .ammo .weapon-name {

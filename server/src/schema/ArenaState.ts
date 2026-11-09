@@ -29,6 +29,8 @@ export class Player extends Schema {
 
   /** Bulletproof vest points (0 = no vest). */
   @type("number") armor = 0;
+  /** Speed boots charge left, 0-100 % (0 = no boots). */
+  @type("number") boots = 0;
   /** Inventory: SLOT_COUNT weapon slots, and which one is in hand. */
   @type([WeaponSlot]) slots = new ArraySchema<WeaponSlot>(new WeaponSlot(), new WeaponSlot(), new WeaponSlot());
   @type("number") active = 0;
@@ -42,19 +44,23 @@ export class Player extends Schema {
   nextZoneDamageAt = 0;
   /** Last time this player sent any input (for kicking AFK players). */
   lastActiveAt = 0;
+  /** Speed boots: ms of running left (`boots` is this as a rounded-up %). */
+  bootsMs = 0;
 }
 
 /**
- * Something lying on the ground: a weapon, a vest, or an ammo box.
+ * Something lying on the ground: a weapon, a vest, speed boots, a medkit or an ammo box.
  * Loot is placed once at match start; after that items only appear when someone drops them.
  */
 export class GroundItem extends Schema {
-  /** "weapon" | "vest" | "ammo" | "medkit" */
+  /** "weapon" | "vest" | "ammo" | "medkit" | "boots" */
   @type("string") kind = "ammo";
   @type("string") weapon = "";
   @type("number") ammo = 0;
   @type("number") reserve = 0;
   @type("number") armor = 0;
+  /** Speed boots charge, 0-100 %. */
+  @type("number") charge = 0;
   @type("number") x = 0;
   @type("number") y = 0;
 
@@ -93,17 +99,19 @@ export class ArenaState extends Schema {
   @type("string") roomName = "";
   /** Room capacity (the lobby's "max players"). */
   @type("number") maxPlayers = 0;
+  /** sessionId of the host: the only one who can start the match before the room is full. */
+  @type("string") hostId = "";
   /** Clients build the same random map from this seed (see shared/map.ts). */
   @type("number") mapSeed = 0;
   /**
    * "warmup"    practice, dead players respawn; waits for the room to fill
-   *             (or MATCH_FILL_WAIT_MS once MATCH_MIN_PLAYERS are in)
-   * "countdown" room full / wait over: "Match starts in 5…"
+   *             (or for the host to start it with MATCH_MIN_PLAYERS+)
+   * "countdown" room full / host started: "Match starts in 5…"
    * "live"      the match: no respawns, the zone runs
    * "ended"     one player left: winner banner, then back to warmup
    */
   @type("string") matchPhase = "warmup";
-  /** Whole seconds left in the countdown / winner banner / warmup fill wait (0 = not waiting). */
+  /** Whole seconds left in the countdown / winner banner. */
   @type("number") phaseSecondsLeft = 0;
   /** sessionId of the last player alive ("" if nobody survived). */
   @type("string") winner = "";

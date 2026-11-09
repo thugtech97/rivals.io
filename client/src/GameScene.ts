@@ -7,6 +7,7 @@ import type { BulletEndEvent, KillEvent, ShotEvent, SwingEvent } from "../../sha
 import {
   createSoldier,
   drawHealthBar,
+  drawBootsIcon,
   drawVestIcon,
   drawWeaponShape,
   itemGlow,
@@ -19,7 +20,7 @@ import { renderMap } from "./mapRender";
 import { Blood } from "./blood";
 import { GameMap } from "../../shared/map";
 import { isTouchMode, type TouchControls } from "./touchControls";
-import { gunStats, heldStats, MEDKIT_HEAL, SLOT_COUNT, WEAPONS, type WeaponId } from "../../shared/weapons";
+import { BOOTS_SPEED_MUL, gunStats, heldStats, MEDKIT_HEAL, SLOT_COUNT, WEAPONS, type WeaponId } from "../../shared/weapons";
 
 /** At or below this HP a soldier leaves a blood trail and your screen pulses red. */
 const LOW_HP = 30;
@@ -46,6 +47,8 @@ interface PlayerData {
   color: number;
   hp: number;
   armor: number;
+  /** Speed boots charge, 0-100 % (0 = none). */
+  boots: number;
   alive: boolean;
   kills: number;
   deaths: number;
@@ -56,11 +59,12 @@ interface PlayerData {
 }
 
 interface ItemData {
-  kind: string; // weapon | vest | ammo | medkit
+  kind: string; // weapon | vest | ammo | medkit | boots
   weapon: string;
   ammo: number;
   reserve: number;
   armor: number;
+  charge: number;
   x: number;
   y: number;
 }
@@ -89,6 +93,8 @@ interface PlayerView {
   /** Where the last footstep sounded (a step every STRIDE_PX walked). */
   stepX: number;
   stepY: number;
+  /** Countdown to the next speed-boots trail puff. */
+  trailInMs: number;
 }
 
 interface BulletView {
@@ -241,6 +247,7 @@ export class GameScene extends Phaser.Scene {
       };
     }
     this.hud.onSlotTap = (i) => this.selectSlot(i);
+    this.hud.onStartMatch = () => this.room.send("startMatch");
     kb.on("keydown-G", () => this.room.send("drop"));
     kb.on("keydown-E", () => this.room.send("pickup"));
     kb.on("keydown-ONE", () => this.selectSlot(0));
@@ -368,6 +375,16 @@ export class GameScene extends Phaser.Scene {
       view.wasAlive = data.alive;
       soldier.root.setVisible(data.alive);
 
+      // Speed boots: little teal puffs behind you while running.
+      if (data.alive && data.boots > 0) {
+        view.trailInMs -= delta;
+        const moving = isMe ? isMoving(this.myInput) : Math.hypot(data.x - soldier.root.x, data.y - soldier.root.y) > 2;
+        if (moving && view.trailInMs <= 0) {
+          view.trailInMs = 70;
+          this.speedPuff(soldier.root.x, soldier.root.y);
+        }
+      }
+
       // Badly hurt: leave a trail of blood drops (faster while moving).
       if (data.alive && data.hp <= LOW_HP) {
         view.dripInMs -= delta;
@@ -380,7 +397,8 @@ export class GameScene extends Phaser.Scene {
 
       if (isMe && data.alive) {
         // Our player: predict locally so movement and aim feel instant (heavy weapons are slower)...
-        if (this.map) applyInput(this.me, this.myInput, delta, this.map, heldStats(heldId).moveMul);
+        const speedMul = heldStats(heldId).moveMul * (data.boots > 0 ? BOOTS_SPEED_MUL : 1);
+        if (this.map) applyInput(this.me, this.myInput, delta, this.map, speedMul);
         // ...then drift toward the server's position (gentle while moving, firm when stopped).
         const dist = Phaser.Math.Distance.Between(this.me.x, this.me.y, data.x, data.y);
         const pull = !isMoving(this.myInput) ? smoothing * 0.5 : dist > 120 ? 0.3 : 0;
@@ -509,6 +527,11 @@ export class GameScene extends Phaser.Scene {
     return String(this.room.state.matchPhase ?? "warmup");
   }
 
+  /** The host can start the match before the room is full. */
+  private get isHost(): boolean {
+    return this.room.state.hostId === this.room.sessionId;
+  }
+
   /** Out of the current match (dead during "live"/"ended"): watching others. */
   private get isSpectator(): boolean {
     const mine = this.views.get(this.room.sessionId);
@@ -610,10 +633,10 @@ export class GameScene extends Phaser.Scene {
     const st = this.room.state;
     switch (this.phase) {
       case "warmup": {
-        const max = Number(st.maxPlayers) || MATCH_MIN_PLAYERS;
-        const count = `Waiting for players… (${this.views.size}/${max})`;
+        const count = `Waiting for players… (${this.views.size}/${Number(st.maxPlayers) || MATCH_MIN_PLAYERS})`;
         if (this.views.size < MATCH_MIN_PLAYERS) return { text: `${count} · warm up!`, urgent: false };
-        return { text: `${count} · match starts when full or in ${formatTime(Number(st.phaseSecondsLeft ?? 0))}`, urgent: false };
+        if (this.isHost) return { text: `${count} · starts when full, or start it now`, urgent: false };
+        return { text: `${count} · starts when full or when the host starts it`, urgent: false };
       }
       case "countdown":
         return { text: `Match starts in ${st.phaseSecondsLeft}…`, urgent: true };
@@ -683,6 +706,8 @@ export class GameScene extends Phaser.Scene {
     // Match clock, zone countdown, and the "you're outside" warning.
     const info = this.zoneText();
     this.hud.setZoneInfo(info.text, info.urgent);
+    const canStart = this.isHost && this.phase === "warmup" && this.views.size >= MATCH_MIN_PLAYERS;
+    this.hud.setStartButton(canStart ? `▶ Start match now (${this.views.size} players)` : null);
     const z = this.zone;
     const s = this.zoneShown;
     const outside =
@@ -703,6 +728,7 @@ export class GameScene extends Phaser.Scene {
     if (mine) {
       const d = mine.data;
       this.hud.setHealth(d.hp, d.armor);
+      this.hud.setBoots(d.alive ? d.boots : 0);
       this.hud.setLowHealth(d.alive && d.hp <= LOW_HP);
 
       // Weapon in hand + the three slots
@@ -756,7 +782,7 @@ export class GameScene extends Phaser.Scene {
       this.scoreboardTimer = 250;
       const inMatch = this.phase === "live" || this.phase === "ended";
       const rows = [...this.views].map(([id, v]) => ({
-        name: v.data.name,
+        name: id === this.room.state.hostId ? `👑 ${v.data.name}` : v.data.name,
         kills: v.data.kills,
         deaths: v.data.deaths,
         isMe: id === this.room.sessionId,
@@ -772,6 +798,7 @@ export class GameScene extends Phaser.Scene {
     if (!near) return "";
     const it = near.data;
     if (it.kind === "vest" && it.armor <= d.armor) return `E: swap your vest (${d.armor}) for this one (${it.armor})`;
+    if (it.kind === "boots" && it.charge <= d.boots) return `E: swap your boots (${d.boots}%) for these (${it.charge}%)`;
     if (it.kind !== "weapon") return "";
     const owned = [0, 1, 2].some((i) => slotOf(d, i).weapon === it.weapon);
     if (owned) return "";
@@ -798,6 +825,7 @@ export class GameScene extends Phaser.Scene {
       dripInMs: 0,
       stepX: data.x,
       stepY: data.y,
+      trailInMs: 0,
     });
 
     if (isMe) {
@@ -1000,6 +1028,8 @@ export class GameScene extends Phaser.Scene {
       drawWeaponShape(g, data.weapon as WeaponId, shift, -9);
     } else if (data.kind === "vest") {
       drawVestIcon(g);
+    } else if (data.kind === "boots") {
+      drawBootsIcon(g);
     } else if (data.kind === "medkit") {
       g.fillStyle(0x000000, 0.3);
       g.fillRoundedRect(-10, -7, 24, 18, 4);
@@ -1057,6 +1087,14 @@ export class GameScene extends Phaser.Scene {
     return best as { obj: Phaser.GameObjects.Container; data: ItemData } | null;
   }
 
+  /** Speed boots trail: a small puff that fades where you just were. */
+  private speedPuff(x: number, y: number) {
+    const puff = this.add
+      .circle(x + (Math.random() - 0.5) * 10, y + (Math.random() - 0.5) * 10, 7, 0x4fe0b6, 0.35)
+      .setDepth(4);
+    this.tweens.add({ targets: puff, scale: 0.2, alpha: 0, duration: 380, onComplete: () => puff.destroy() });
+  }
+
   /** Name tag over the closest item, e.g. "Sniper · 5/10", "Vest · 50", "Medkit +40". */
   private updateItemLabel(mine?: PlayerView) {
     const near = mine?.data.alive ? this.nearestItem(this.me.x, this.me.y, ITEM_LABEL_RANGE) : null;
@@ -1070,6 +1108,7 @@ export class GameScene extends Phaser.Scene {
       const gun = gunStats(it.weapon);
       text = heldStats(it.weapon).name + (gun ? ` · ${it.ammo}/${it.reserve}` : "");
     } else if (it.kind === "vest") text = `Vest · ${it.armor}`;
+    else if (it.kind === "boots") text = `Speed boots · ${it.charge}%`;
     else if (it.kind === "medkit") text = `Medkit +${MEDKIT_HEAL}${mine!.data.hp >= PLAYER_MAX_HP ? " (full HP)" : ""}`;
     this.itemLabel.setText(text).setPosition(it.x, it.y - 22).setVisible(true);
   }

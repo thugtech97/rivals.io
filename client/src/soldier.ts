@@ -277,6 +277,7 @@ export function drawWeaponShape(g: G, id: WeaponId, ox: number, oy: number) {
 /** Highlight color for loot on the ground. */
 export function itemGlow(kind: string, weapon: string): number {
   if (kind === "vest") return 0x5aa9ff;
+  if (kind === "boots") return 0x4fe0b6;
   if (kind === "ammo") return 0xd9a441;
   return ({ sniper: 0xffc94a, mg: 0xc07aff, rifle: 0x63b3ff, pistol: 0xc9ced6 } as Record<string, number>)[weapon] ?? 0x7ee08a;
 }
@@ -292,6 +293,22 @@ export function drawVestIcon(g: G) {
   g.fillRect(4, -15, 5, 5);
   g.lineStyle(1.5, 0x1c241a, 1);
   g.strokeRoundedRect(-11, -13, 22, 26, 5);
+}
+
+/** Speed boots lying on the ground (icon): a pair of sneakers with a speed stripe. */
+export function drawBootsIcon(g: G) {
+  for (const [ox, oy] of [[-8, -4], [3, 2]]) {
+    g.fillStyle(0x000000, 0.3);
+    g.fillRoundedRect(ox + 1, oy - 5, 14, 12, 3);
+    g.fillStyle(0x2a3140, 1); // shaft
+    g.fillRoundedRect(ox, oy - 8, 7, 10, 2);
+    g.fillStyle(0x4fe0b6, 1); // shoe
+    g.fillRoundedRect(ox, oy - 1, 14, 6, 3);
+    g.fillStyle(0xf2f2f2, 1); // sole
+    g.fillRect(ox + 1, oy + 4, 13, 1.5);
+    g.fillStyle(0xffffff, 0.9); // stripe
+    g.fillRect(ox + 2, oy - 5, 4, 1.5);
+  }
 }
 
 /** Multiply an 0xRRGGBB color's brightness. */

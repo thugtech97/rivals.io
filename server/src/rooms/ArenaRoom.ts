@@ -14,7 +14,6 @@ import {
   TICK_MS,
   MATCH_COUNTDOWN_MS,
   MATCH_END_MS,
-  MATCH_FILL_WAIT_MS,
   MATCH_MIN_PLAYERS,
   ZONE_DAMAGE_PER_SEC,
   ZONE_HOLD_MS,
@@ -23,13 +22,16 @@ import {
   ZONE_SHRINK_MS,
   ZONE_START_MS,
   ZONE_START_SIZE,
+  HOST_IDLE_MS,
   IDLE_KICK_CODE,
   IDLE_KICK_MS,
 } from "../../../shared/constants";
-import { angleDelta, applyInput, clamp, muzzlePosition, NO_INPUT, type InputState } from "../../../shared/movement";
+import { angleDelta, applyInput, clamp, isMoving, muzzlePosition, NO_INPUT, type InputState } from "../../../shared/movement";
 import type { BulletEndEvent, KillEvent, ShotEvent, SwingEvent } from "../../../shared/messages";
 import { GameMap, newMapSeed } from "../../../shared/map";
 import {
+  BOOTS_DURATION_MS,
+  BOOTS_SPEED_MUL,
   gunStats,
   heldStats,
   LOOT_TABLE,
@@ -60,8 +62,8 @@ const zoneHoldMs = Number(process.env.ZONE_HOLD_MS) || ZONE_HOLD_MS;
 const zoneShrinkMs = Number(process.env.ZONE_SHRINK_MS) || ZONE_SHRINK_MS;
 /** AFK kick timeout (IDLE_KICK_MS env var is only for quick local testing). */
 const idleKickMs = Number(process.env.IDLE_KICK_MS) || IDLE_KICK_MS;
-/** Warmup wait for a room that isn't full (MATCH_FILL_WAIT_MS env var is only for quick local testing). */
-const fillWaitMs = Number(process.env.MATCH_FILL_WAIT_MS) || MATCH_FILL_WAIT_MS;
+/** AFK host hand-over (HOST_IDLE_MS env var is only for quick local testing). */
+const hostIdleMs = Number(process.env.HOST_IDLE_MS) || HOST_IDLE_MS;
 /** TEST_HOOKS=1 enables a "debugTeleport" message for automated tests. Never set it in production. */
 const TEST_HOOKS = process.env.TEST_HOOKS === "1";
 
@@ -94,14 +96,14 @@ const COLORS = [0xd9534f, 0x3fa7d6, 0xe0b84a, 0x5cb85c, 0x9b6cd1, 0xe8834a, 0x4a
 
 export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata }> {
   private heldKeys = new Map<string, InputState>();
+  /** Last real input per player (unlike Player.lastActiveAt, joining doesn't count). */
+  private lastInputAt = new Map<string, number>();
   private bullets: Bullet[] = [];
   private nextBulletId = 1;
   private nextItemId = 1;
   private matchStart = 0;
   /** When the countdown / winner banner ends. */
   private phaseEndsAt = 0;
-  /** Warmup: when the match starts even if the room isn't full (0 = not enough players yet). */
-  private fillDeadline = 0;
   /** This room's map. A new random one is generated for every match. */
   private map!: GameMap;
 
@@ -109,7 +111,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     this.setState(new ArenaState());
     this.newMap();
     this.resetZone();
-    this.spawnLoot();
+    this.spawnLoot(MATCH_MIN_PLAYERS); // warmup loot; each match spawns its own for its player count
 
     const requested = Math.round(Number(options.maxPlayers) || DEFAULT_PLAYERS_PER_ROOM);
     this.maxClients = clamp(requested, MIN_PLAYERS_PER_ROOM, MAX_PLAYERS_PER_ROOM);
@@ -165,6 +167,15 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       if (p?.alive) this.manualPickup(p, client.sessionId);
     });
 
+    // Host: start now with whoever is here (someone didn't show up).
+    this.onMessage("startMatch", (client) => {
+      this.markActive(client.sessionId);
+      const s = this.state;
+      if (client.sessionId !== s.hostId || s.matchPhase !== "warmup" || s.players.size < MATCH_MIN_PLAYERS) return;
+      this.startCountdown(this.clock.currentTime);
+      console.log(`[${this.roomId}] host started the match early (${s.players.size}/${this.maxClients})`);
+    });
+
     if (TEST_HOOKS) {
       this.onMessage("debugTeleport", (client, pos: { x: number; y: number }) => {
         const p = this.state.players.get(client.sessionId);
@@ -194,6 +205,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     player.lastActiveAt = this.clock.currentTime;
     this.state.players.set(client.sessionId, player);
     this.heldKeys.set(client.sessionId, { ...NO_INPUT });
+    if (!this.state.hostId) this.setHost(client.sessionId);
     console.log(`[${this.roomId}] ${player.name} joined (${this.clients.length}/${this.maxClients})`);
   }
 
@@ -203,7 +215,34 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     if (player?.alive && this.state.matchPhase === "live") this.dropEverything(player);
     this.state.players.delete(client.sessionId);
     this.heldKeys.delete(client.sessionId);
+    this.lastInputAt.delete(client.sessionId);
     console.log(`[${this.roomId}] ${player?.name ?? client.sessionId} left`);
+    // The host left: the player who has been here longest takes over.
+    if (this.state.hostId === client.sessionId) this.setHost(this.state.players.keys().next().value ?? "");
+  }
+
+  private setHost(sessionId: string) {
+    this.state.hostId = sessionId;
+    const name = this.state.players.get(sessionId)?.name;
+    if (name) void this.setMetadata({ ...this.metadata, hostName: name });
+  }
+
+  /**
+   * Warmup: an AFK host would leave everyone waiting for a full room. After hostIdleMs
+   * without input (counted from joining), the player who has been here longest *and* has
+   * actually played in that time becomes host. (If nobody else has, the host stays.)
+   */
+  private replaceIdleHost(now: number) {
+    const s = this.state;
+    const host = s.players.get(s.hostId);
+    if (!host || now - host.lastActiveAt < hostIdleMs) return;
+    for (const [id, p] of s.players) {
+      if (id !== s.hostId && now - (this.lastInputAt.get(id) ?? -Infinity) < hostIdleMs) {
+        console.log(`[${this.roomId}] ${host.name} is AFK, ${p.name} is the host now`);
+        this.setHost(id);
+        return;
+      }
+    }
   }
 
   // ---------- Game loop ----------
@@ -225,8 +264,10 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
       const slot = player.slots[player.active];
       const held = heldStats(slot.weapon);
-      applyInput(player, input, dtMs, this.map, held.moveMul);
+      applyInput(player, input, dtMs, this.map, held.moveMul * (player.boots > 0 ? BOOTS_SPEED_MUL : 1));
       player.angle = input.angle;
+      // Speed boots wear out while you run (only while moving), then they're gone.
+      if (player.boots > 0 && isMoving(input)) setBoots(player, player.bootsMs - dtMs);
 
       // In the red: lose ZONE_DAMAGE_PER_SEC the moment you touch it, then again every second.
       // (Stepping in and out can't hurt you faster than once per second. Vests don't help.)
@@ -266,6 +307,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
     this.moveBullets(dtMs, now);
     this.kickIdlePlayers(now);
+    if (this.state.matchPhase === "warmup") this.replaceIdleHost(now);
   }
 
   private fire(owner: string, player: Player, slot: WeaponSlot, gun: GunStats, now: number) {
@@ -431,6 +473,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     player.y = spot.y;
     player.hp = PLAYER_MAX_HP;
     player.armor = 0;
+    setBoots(player, 0);
     player.alive = true;
     player.reloading = false;
     player.nextShotAt = 0;
@@ -443,10 +486,12 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
   // ---------- Items on the ground ----------
 
   /** Scatter the match's loot. This is the only time items appear by themselves. */
-  private spawnLoot() {
+  /** `players`: how many are in the match (some loot, like ammo, scales with it). */
+  private spawnLoot(players: number) {
     this.state.items.clear();
     for (const entry of LOOT_TABLE) {
-      for (let i = 0; i < entry.count; i++) {
+      const count = entry.count + (entry.perPlayer ?? 0) * players;
+      for (let i = 0; i < count; i++) {
         const spot = this.map.findFreeSpot(PICKUP_RADIUS + PLAYER_RADIUS * 2, 60);
         const item = new GroundItem();
         item.kind = entry.item;
@@ -461,6 +506,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
           }
         }
         if (entry.item === "vest") item.armor = VEST_ARMOR;
+        if (entry.item === "boots") item.charge = 100;
         this.state.items.set(String(this.nextItemId++), item);
       }
     }
@@ -530,6 +576,13 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       this.placeItem(vest, player.x, player.y);
       player.armor = 0;
     }
+    if (player.boots > 0) {
+      const boots = new GroundItem();
+      boots.kind = "boots";
+      boots.charge = player.boots;
+      this.placeItem(boots, player.x, player.y);
+      setBoots(player, 0);
+    }
   }
 
   /** Walking over items: take what fits without a choice. Full slots need E. */
@@ -592,6 +645,19 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       return;
     }
 
+    if (item.kind === "boots") {
+      if (item.charge <= player.boots && !swap) return; // only auto-take fresher boots
+      if (player.boots > 0) {
+        const old = new GroundItem();
+        old.kind = "boots";
+        old.charge = player.boots;
+        this.placeItem(old, player.x, player.y, playerId);
+      }
+      setBoots(player, (item.charge / 100) * BOOTS_DURATION_MS);
+      this.state.items.delete(itemId);
+      return;
+    }
+
     // A weapon
     const owned = player.slots.find((s) => s.weapon === item.weapon);
     const gun = gunStats(item.weapon);
@@ -632,6 +698,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
   private markActive(sessionId: string) {
     const p = this.state.players.get(sessionId);
     if (p) p.lastActiveAt = this.clock.currentTime;
+    this.lastInputAt.set(sessionId, this.clock.currentTime);
   }
 
   /**
@@ -649,7 +716,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
   // ---------- Match flow ----------
   //
-  //  warmup ──(room full, or 2+ players for 60s)──▶ countdown 5s ──▶ live (no respawns, zone runs)
+  //  warmup ──(room full, or host starts with 2+)──▶ countdown 5s ──▶ live (no respawns, zone runs)
   //     ▲                        │ (someone left, <2)          │ (≤1 alive)
   //     └────────────────────────┘                              ▼
   //     └──────────────── 8s winner banner ◀──────────────── ended
@@ -661,23 +728,13 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
     switch (s.matchPhase) {
       case "warmup":
-        // Keep the room open until it's full. If it never fills, start anyway after a while.
-        if (players < MATCH_MIN_PLAYERS) {
-          this.fillDeadline = 0;
-        } else if (!this.fillDeadline) {
-          this.fillDeadline = now + fillWaitMs;
-        }
-        if (players >= MATCH_MIN_PLAYERS && (players >= this.maxClients || now >= this.fillDeadline)) {
-          s.matchPhase = "countdown";
-          this.phaseEndsAt = now + MATCH_COUNTDOWN_MS;
-          this.fillDeadline = 0;
-        }
+        // Keep the room open until it's full (the host can also start early: "startMatch").
+        if (players >= MATCH_MIN_PLAYERS && players >= this.maxClients) this.startCountdown(now);
         break;
 
       case "countdown":
         if (players < MATCH_MIN_PLAYERS) {
           s.matchPhase = "warmup";
-          this.fillDeadline = 0;
         } else if (now >= this.phaseEndsAt) {
           this.startMatch(now);
         }
@@ -692,8 +749,14 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
         break;
     }
 
-    const endsAt = s.matchPhase === "countdown" || s.matchPhase === "ended" ? this.phaseEndsAt : s.matchPhase === "warmup" ? this.fillDeadline : 0;
-    s.phaseSecondsLeft = endsAt ? Math.max(0, Math.ceil((endsAt - now) / 1000)) : 0;
+    s.phaseSecondsLeft =
+      s.matchPhase === "countdown" || s.matchPhase === "ended" ? Math.max(0, Math.ceil((this.phaseEndsAt - now) / 1000)) : 0;
+  }
+
+  /** "Match starts in 5…" (players can still join during it, up to the room size). */
+  private startCountdown(now: number) {
+    this.state.matchPhase = "countdown";
+    this.phaseEndsAt = now + MATCH_COUNTDOWN_MS;
   }
 
   private startMatch(now: number) {
@@ -705,7 +768,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     this.resetZone();
     this.bullets = [];
     this.newMap(); // a brand-new random map for every match
-    this.spawnLoot(); // and fresh loot (placed once; nothing respawns during the match)
+    this.spawnLoot(s.players.size); // and fresh loot (placed once; nothing respawns during the match)
     // Everyone starts equal
     s.players.forEach((p) => {
       p.kills = 0;
@@ -737,7 +800,6 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
   private backToWarmup() {
     const s = this.state;
     s.matchPhase = "warmup";
-    this.fillDeadline = 0;
     s.winner = "";
     s.matchSeconds = 0;
     this.resetZone();
@@ -872,3 +934,9 @@ function cleanText(value: unknown, maxLength: number): string {
 
 // Make sure every weapon in the loot table exists (catches typos at startup).
 for (const e of LOOT_TABLE) if (e.weapon && !WEAPONS[e.weapon]) throw new Error(`Unknown weapon in LOOT_TABLE: ${e.weapon}`);
+
+/** Speed boots: set the ms of running left (and the synced %, 0 = no boots). */
+function setBoots(player: Player, ms: number) {
+  player.bootsMs = Math.max(0, ms);
+  player.boots = Math.ceil((player.bootsMs / BOOTS_DURATION_MS) * 100);
+}

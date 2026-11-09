@@ -46,19 +46,19 @@ export type WeaponStats = GunStats | MeleeStats;
 
 export const WEAPONS: Record<WeaponId, WeaponStats> = {
   pistol: {
-    kind: "gun", name: "Pistol", damage: 18, fireMs: 260, mag: 12, lootReserve: 24, maxReserve: 48, boxAmmo: 12,
+    kind: "gun", name: "Pistol", damage: 18, fireMs: 260, mag: 12, lootReserve: 24, maxReserve: 48, boxAmmo: 24,
     reloadMs: 1100, bulletSpeed: 900, bulletLifeMs: 560, spread: 0.03, moveMul: 1, muzzle: 30,
   },
   rifle: {
-    kind: "gun", name: "Rifle", damage: 25, fireMs: 130, mag: 25, lootReserve: 50, maxReserve: 100, boxAmmo: 25,
+    kind: "gun", name: "Rifle", damage: 25, fireMs: 130, mag: 25, lootReserve: 50, maxReserve: 100, boxAmmo: 50,
     reloadMs: 1500, bulletSpeed: 950, bulletLifeMs: 650, spread: 0.035, moveMul: 0.95, muzzle: 37,
   },
   mg: {
-    kind: "gun", name: "Machine gun", damage: 16, fireMs: 75, mag: 60, lootReserve: 60, maxReserve: 120, boxAmmo: 40,
+    kind: "gun", name: "Machine gun", damage: 16, fireMs: 75, mag: 60, lootReserve: 60, maxReserve: 120, boxAmmo: 80,
     reloadMs: 3000, bulletSpeed: 900, bulletLifeMs: 600, spread: 0.09, moveMul: 0.82, muzzle: 40,
   },
   sniper: {
-    kind: "gun", name: "Sniper", damage: 80, fireMs: 1100, mag: 5, lootReserve: 10, maxReserve: 20, boxAmmo: 5,
+    kind: "gun", name: "Sniper", damage: 80, fireMs: 1100, mag: 5, lootReserve: 10, maxReserve: 20, boxAmmo: 10,
     reloadMs: 2300, bulletSpeed: 2200, bulletLifeMs: 650, spread: 0, moveMul: 0.9, muzzle: 48,
   },
   knife: { kind: "melee", name: "Knife", damage: 30, range: 26, arc: 1.4, swingMs: 350, moveMul: 1.05 },
@@ -73,14 +73,29 @@ export const SLOT_COUNT = 3;
 export const VEST_ARMOR = 50;
 export const VEST_ABSORB = 0.7;
 
+/**
+ * Speed boots: walk this much faster. Their charge only drains while you move, and they're
+ * gone once it's used up (BOOTS_DURATION_MS of running in total).
+ */
+export const BOOTS_SPEED_MUL = 1.35;
+export const BOOTS_DURATION_MS = 20_000;
+
 /** Medkit: HP restored (up to the max). Only picked up when you're hurt. */
 export const MEDKIT_HEAL = 40;
 
 /** What everyone starts a match (and each warmup life) with. */
 export const STARTING_WEAPON: GunId = "pistol";
 
-/** Loot placed on the map at the start of each match. Nothing else appears later. */
-export const LOOT_TABLE: { item: "weapon" | "vest" | "ammo" | "medkit"; weapon?: WeaponId; count: number }[] = [
+/**
+ * Loot placed on the map at the start of each match. Nothing else appears later.
+ * `perPlayer` adds that many more for every player in the match (more players, more ammo).
+ */
+export const LOOT_TABLE: {
+  item: "weapon" | "vest" | "ammo" | "medkit" | "boots";
+  weapon?: WeaponId;
+  count: number;
+  perPlayer?: number;
+}[] = [
   { item: "medkit", count: 8 },
   { item: "weapon", weapon: "rifle", count: 5 },
   { item: "weapon", weapon: "mg", count: 2 },
@@ -90,7 +105,8 @@ export const LOOT_TABLE: { item: "weapon" | "vest" | "ammo" | "medkit"; weapon?:
   { item: "weapon", weapon: "sword", count: 2 },
   { item: "weapon", weapon: "axe", count: 2 },
   { item: "vest", count: 5 },
-  { item: "ammo", count: 14 },
+  { item: "boots", count: 4 },
+  { item: "ammo", count: 10, perPlayer: 3 }, // 2 players: 16 boxes, 4: 22, 8: 34, 16: 58
 ];
 
 export function isGun(id: string): id is GunId {

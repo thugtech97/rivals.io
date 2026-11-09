@@ -32,13 +32,11 @@ export const PICKUP_RADIUS = 14;
 
 // ---------- Match (last player alive wins) ----------
 
-/** A match needs at least this many players. */
-export const MATCH_MIN_PLAYERS = 2;
 /**
- * The room keeps taking players until it's full; a full room starts the countdown right away.
- * If it never fills, the match starts anyway this long after MATCH_MIN_PLAYERS are in.
+ * A match needs at least this many players. The room keeps taking players until it's full
+ * (then the countdown starts by itself), or until the host presses "Start match".
  */
-export const MATCH_FILL_WAIT_MS = 60_000;
+export const MATCH_MIN_PLAYERS = 2;
 /** "Match starts in 5…" */
 export const MATCH_COUNTDOWN_MS = 5000;
 /** How long the winner banner shows before the room goes back to warmup. */
@@ -70,6 +68,8 @@ export const ZONE_DAMAGE_PER_SEC = 10;
 export const IDLE_KICK_MS = 10 * 60_000;
 /** WebSocket close code used for that kick, so the client can explain it. */
 export const IDLE_KICK_CODE = 4001;
+/** An AFK host (no input this long during warmup) hands "Start match" to an active player. */
+export const HOST_IDLE_MS = 60_000;
 
 export const NAME_MAX_LENGTH = 16;
 export const ROOM_NAME_MAX_LENGTH = 24;
