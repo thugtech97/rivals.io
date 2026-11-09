@@ -1,18 +1,44 @@
 import Phaser from "phaser";
+import { bakeAtlas } from "./atlas";
+import { particleCount, qualitySettings } from "./quality";
 
 // Blood effects: sprays when a bullet hits, splats on the ground, drip trails at low HP,
 // and pools on death. Everything is cosmetic (client-side only) and fades away.
+//
+// Stains are images cut from a few pre-drawn variants (baked once), not live Graphics:
+// a long fight leaves a couple of hundred of them, and Graphics are redrawn every frame.
 
 const DARK = 0x5c0606;
 const RED = 0x8a0f0f;
 const BRIGHT = 0xb01818;
-const MAX_STAINS = 220; // oldest stains are removed beyond this
 const STAIN_DEPTH = 2; // on the ground: above the map, under crates and soldiers
 
-export class Blood {
-  private stains: Phaser.GameObjects.Graphics[] = [];
+const ATLAS_KEY = "blood-stains";
+/** Variants are drawn at this blob size, then scaled to each stain's size. */
+const BASE_SIZE = 24;
+/** Texture pixels per world pixel for the variants (a little extra so big pools stay sharp). */
+const ATLAS_RES = 1.5;
+const SPATTER_VARIANTS = 8; // splats with spatter flung to one side
+const DROP_VARIANTS = 3; // small round drops
 
-  constructor(private scene: Phaser.Scene) {}
+export class Blood {
+  private stains: Phaser.GameObjects.Image[] = [];
+  private baked = false;
+
+  constructor(private scene: Phaser.Scene) {
+    const cells = [];
+    for (let i = 0; i < SPATTER_VARIANTS + DROP_VARIANTS; i++) {
+      const spatter = i < SPATTER_VARIANTS;
+      // The blob's center is the image's center, so the cell is symmetric around it
+      // (spatter reaches ~3.2× the blob size to the right, so the cell is that wide both ways).
+      cells.push({
+        w: BASE_SIZE * 6.6,
+        h: BASE_SIZE * 2.4,
+        draw: (g: Phaser.GameObjects.Graphics, cx: number, cy: number) => drawStain(g, cx, cy, BASE_SIZE, spatter),
+      });
+    }
+    this.baked = bakeAtlas(scene, ATLAS_KEY, cells, ATLAS_RES);
+  }
 
   /** A bullet hit someone at (x, y) travelling at `angle`: droplets fly on, a splatter lands behind. */
   bulletHit(x: number, y: number, angle: number) {
@@ -38,9 +64,10 @@ export class Blood {
     this.stain(x, y, 20 + Math.random() * 6, Math.random() * Math.PI * 2, 12000);
   }
 
-  /** Droplets that fly out in a cone around `angle` and vanish. */
+  /** Droplets that fly out in a cone around `angle` and vanish (fewer on lower quality). */
   private spray(x: number, y: number, angle: number, count: number, spread = 0.6) {
-    for (let i = 0; i < count; i++) {
+    const n = particleCount(count, 3);
+    for (let i = 0; i < n; i++) {
       const a = angle + (Math.random() - 0.5) * spread * 2;
       const dist = 16 + Math.random() * 34;
       const drop = this.scene.add.circle(x, y, 1.5 + Math.random() * 2, Math.random() < 0.5 ? RED : BRIGHT, 1).setDepth(16);
@@ -59,36 +86,50 @@ export class Blood {
 
   /** A blood stain on the ground: a main blob with spatter thrown toward `angle`. Fades after `lifeMs`. */
   private stain(x: number, y: number, size: number, angle: number | undefined, lifeMs: number) {
-    const g = this.scene.add.graphics({ x, y }).setDepth(STAIN_DEPTH).setAlpha(0.85);
-    g.setRotation(angle ?? Math.random() * Math.PI * 2);
+    if (!this.baked) return; // couldn't bake the variants (no texture space): skip stains
+    const spatter = angle !== undefined || size > 6;
+    const frame = spatter ? Math.floor(Math.random() * SPATTER_VARIANTS) : SPATTER_VARIANTS + Math.floor(Math.random() * DROP_VARIANTS);
+    const img = this.scene.add
+      .image(x, y, ATLAS_KEY, String(frame))
+      .setScale(size / BASE_SIZE / ATLAS_RES)
+      .setRotation(angle ?? Math.random() * Math.PI * 2)
+      .setDepth(STAIN_DEPTH)
+      .setAlpha(0.85);
 
-    g.fillStyle(RED, 1);
-    g.fillCircle(0, 0, size);
-    g.fillEllipse(size * 0.5, 0, size * 1.8, size * 1.1);
-    if (angle !== undefined || size > 6) {
-      // Spatter flung outward along the rotation (+x)
-      const n = 3 + Math.floor(Math.random() * 4);
-      for (let i = 0; i < n; i++) {
-        const d = size * (1 + Math.random() * 1.8);
-        const r = size * (0.12 + Math.random() * 0.3);
-        g.fillCircle(d, (Math.random() - 0.5) * size * 1.4, r);
-      }
+    this.stains.push(img);
+    const max = qualitySettings().maxStains;
+    while (this.stains.length > max) {
+      const old = this.stains.shift()!;
+      this.scene.tweens.killTweensOf(old);
+      old.destroy();
     }
-    g.fillStyle(DARK, 0.7);
-    g.fillCircle(-size * 0.1, size * 0.05, size * 0.55);
-
-    this.stains.push(g);
-    if (this.stains.length > MAX_STAINS) this.stains.shift()?.destroy();
 
     this.scene.tweens.add({
-      targets: g,
+      targets: img,
       alpha: 0,
       delay: lifeMs,
       duration: 1500,
       onComplete: () => {
-        this.stains = this.stains.filter((s) => s !== g);
-        g.destroy();
+        this.stains = this.stains.filter((s) => s !== img);
+        img.destroy();
       },
     });
   }
+}
+
+/** One stain drawn with its blob centered at (cx, cy); spatter is flung toward +x. */
+function drawStain(g: Phaser.GameObjects.Graphics, cx: number, cy: number, size: number, spatter: boolean) {
+  g.fillStyle(RED, 1);
+  g.fillCircle(cx, cy, size);
+  g.fillEllipse(cx + size * 0.5, cy, size * 1.8, size * 1.1);
+  if (spatter) {
+    const n = 3 + Math.floor(Math.random() * 4);
+    for (let i = 0; i < n; i++) {
+      const d = size * (1 + Math.random() * 1.8);
+      const r = size * (0.12 + Math.random() * 0.3);
+      g.fillCircle(cx + d, cy + (Math.random() - 0.5) * size * 1.4, r);
+    }
+  }
+  g.fillStyle(DARK, 0.7);
+  g.fillCircle(cx - size * 0.1, cy + size * 0.05, size * 0.55);
 }

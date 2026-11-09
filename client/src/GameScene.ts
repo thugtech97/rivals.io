@@ -16,7 +16,9 @@ import {
   type SoldierView,
 } from "./soldier";
 import type { Hud, SlotInfo } from "./hud";
-import { renderMap } from "./mapRender";
+import { renderMap, type RenderedMap } from "./mapRender";
+import { bakeShape } from "./atlas";
+import { cycleQuality, onQualityChange, particleCount, qualitySettings } from "./quality";
 import { Blood } from "./blood";
 import { GameMap } from "../../shared/map";
 import { isTouchMode, type TouchControls } from "./touchControls";
@@ -139,8 +141,11 @@ const ZOOM_PARAM = Number(new URLSearchParams(location.search).get("zoom"));
 const CAMERA_ZOOM = ZOOM_PARAM || 1.4;
 /** Holding a sniper zooms the camera out so you can see as far as it shoots. */
 const SNIPER_ZOOM = Math.min(CAMERA_ZOOM, 0.9);
-/** The map is baked at this resolution so it stays sharp at the default zoom. */
-const MAP_RESOLUTION = 1.4;
+/**
+ * Other players glide toward their latest server position. Higher = snappier (less delay
+ * behind the real position), lower = smoother. Per second: the remaining gap shrinks to this.
+ */
+const REMOTE_LAG_LEFT_PER_SEC = 0.00002;
 
 /** Read slot i from the synced array (works with ArraySchema and plain arrays). */
 function slotOf(d: PlayerData, i: number): SlotData {
@@ -159,7 +164,7 @@ export class GameScene extends Phaser.Scene {
 
   private views = new Map<string, PlayerView>();
   private bullets = new Map<number, BulletView>();
-  private items = new Map<string, { obj: Phaser.GameObjects.Container; data: ItemData }>();
+  private items = new Map<string, { obj: Phaser.GameObjects.Container; data: ItemData; glow: Phaser.GameObjects.Image; phase: number }>();
   /** Thrown grenades (synced positions) and their blinking fuse light. */
   private grenades = new Map<string, { obj: Phaser.GameObjects.Container; light: Phaser.GameObjects.Arc; data: { x: number; y: number }; bornAt: number }>();
   private itemLabel!: Phaser.GameObjects.Text;
@@ -179,7 +184,9 @@ export class GameScene extends Phaser.Scene {
   private lastPhase = "";
   private map?: GameMap;
   /** Everything renderMap() created, destroyed when the map changes. */
-  private mapObjects: Phaser.GameObjects.GameObject[] = [];
+  private rendered: RenderedMap = { objects: [], textures: [] };
+  /** Stops listening for quality changes when the scene goes away. */
+  private offQuality?: () => void;
   private zoneGfx!: Phaser.GameObjects.Graphics;
   /** The zone square as currently drawn (smoothed between server updates). */
   private zoneShown: { x: number; y: number; size: number } | null = null;
@@ -213,7 +220,7 @@ export class GameScene extends Phaser.Scene {
     this.lastPhase = "";
     this.views.clear();
     this.map = undefined;
-    this.mapObjects = [];
+    this.rendered = { objects: [], textures: [] };
     this.killedBy = "";
     this.killedById = "";
     this.spectating = "";
@@ -261,6 +268,13 @@ export class GameScene extends Phaser.Scene {
       .forEach((key, i) => kb.on(`keydown-${key}`, () => this.selectSlot(i)));
     this.input.on("wheel", (_p: unknown, _o: unknown, _dx: number, dy: number) => this.cycleSlot(dy > 0 ? 1 : -1));
     kb.on("keydown-M", () => this.onMuteToggle?.(sfx.toggleMute()));
+    kb.on("keydown-Q", () => cycleQuality());
+    // Graphics quality changed (Q or the toolbar button): re-bake the map at the new sharpness.
+    this.offQuality = onQualityChange(() => {
+      if (this.map) this.loadMap(this.map.seed, true);
+    });
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => this.offQuality?.());
+    this.events.once(Phaser.Scenes.Events.DESTROY, () => this.offQuality?.());
     // Spectator controls (only do anything while you're out of the match)
     kb.on("keydown-SPACE", () => this.cycleSpectate(1));
     kb.on("keydown-RIGHT", () => this.cycleSpectate(1));
@@ -343,6 +357,7 @@ export class GameScene extends Phaser.Scene {
     this.readInput(time, mine);
 
     const smoothing = 1 - Math.pow(0.001, delta / 1000); // frame-rate independent lerp factor
+    const remoteSmoothing = 1 - Math.pow(REMOTE_LAG_LEFT_PER_SEC, delta / 1000);
 
     this.views.forEach((view, sessionId) => {
       const { soldier, data } = view;
@@ -392,7 +407,7 @@ export class GameScene extends Phaser.Scene {
         view.trailInMs -= delta;
         const moving = isMe ? isMoving(this.myInput) : Math.hypot(data.x - soldier.root.x, data.y - soldier.root.y) > 2;
         if (moving && view.trailInMs <= 0) {
-          view.trailInMs = 70;
+          view.trailInMs = 70 / qualitySettings().particles;
           this.speedPuff(soldier.root.x, soldier.root.y);
         }
       }
@@ -420,9 +435,9 @@ export class GameScene extends Phaser.Scene {
         soldier.body.rotation = this.myInput.angle;
       } else {
         // Other players: interpolate position and aim toward the latest server values.
-        soldier.root.x += (data.x - soldier.root.x) * smoothing;
-        soldier.root.y += (data.y - soldier.root.y) * smoothing;
-        soldier.body.rotation += angleDelta(soldier.body.rotation, data.angle) * Math.min(1, smoothing * 1.5);
+        soldier.root.x += (data.x - soldier.root.x) * remoteSmoothing;
+        soldier.root.y += (data.y - soldier.root.y) * remoteSmoothing;
+        soldier.body.rotation += angleDelta(soldier.body.rotation, data.angle) * Math.min(1, remoteSmoothing * 1.5);
       }
     });
 
@@ -431,6 +446,7 @@ export class GameScene extends Phaser.Scene {
     this.drawZone(smoothing);
     this.updateCamera(mine);
     this.updateItemLabel(mine);
+    this.updateItems(this.time.now);
     this.updateSounds(time, mine);
     this.updateHud(time, delta, mine);
   }
@@ -527,11 +543,13 @@ export class GameScene extends Phaser.Scene {
   // ---------- Map ----------
 
   /** Build (or replace) the map from a seed: same seed → same map as the server. */
-  private loadMap(seed: number) {
-    if (!seed || this.map?.seed === seed) return;
-    for (const o of this.mapObjects) o.destroy();
-    this.map = new GameMap(seed);
-    this.mapObjects = renderMap(this, this.map, MAP_RESOLUTION);
+  /** Build (or with `force`, rebuild at the current quality) the map for this seed. */
+  private loadMap(seed: number, force = false) {
+    if (!seed || (this.map?.seed === seed && !force)) return;
+    for (const o of this.rendered.objects) o.destroy();
+    for (const key of this.rendered.textures) if (this.textures.exists(key)) this.textures.remove(key);
+    if (this.map?.seed !== seed) this.map = new GameMap(seed);
+    this.rendered = renderMap(this, this.map!, qualitySettings().mapResolution);
     this.tryReady();
   }
 
@@ -870,17 +888,21 @@ export class GameScene extends Phaser.Scene {
 
   /** Green "+" sparkles when someone heals. */
   private healEffect(x: number, y: number) {
-    for (let i = 0; i < 6; i++) {
+    // A baked "+" image (a Text object would make and upload its own texture each time).
+    const key = "heal-plus";
+    bakeShape(this, key, 14, 14, 2, (g) => {
+      g.fillStyle(0x0b2a0b, 1); // dark outline
+      g.fillRect(-2.5, -6.5, 5, 13);
+      g.fillRect(-6.5, -2.5, 13, 5);
+      g.fillStyle(0x6fdc6f, 1);
+      g.fillRect(-1.25, -5.25, 2.5, 10.5);
+      g.fillRect(-5.25, -1.25, 10.5, 2.5);
+    });
+    const n = particleCount(6, 2);
+    for (let i = 0; i < n; i++) {
       const p = this.add
-        .text(x + (Math.random() - 0.5) * 30, y + (Math.random() - 0.5) * 20, "+", {
-          fontFamily: "system-ui, sans-serif",
-          fontSize: "16px",
-          fontStyle: "bold",
-          color: "#6fdc6f",
-          stroke: "#0b2a0b",
-          strokeThickness: 3,
-        })
-        .setOrigin(0.5)
+        .image(x + (Math.random() - 0.5) * 30, y + (Math.random() - 0.5) * 20, key)
+        .setScale(0.5)
         .setDepth(32);
       this.tweens.add({ targets: p, y: p.y - 30, alpha: 0, delay: i * 40, duration: 600, onComplete: () => p.destroy() });
     }
@@ -967,7 +989,7 @@ export class GameScene extends Phaser.Scene {
       if (b.weapon === "bazooka") {
         b.smokeInMs -= delta;
         if (b.smokeInMs <= 0) {
-          b.smokeInMs = 28;
+          b.smokeInMs = 28 / qualitySettings().particles;
           const puff = this.add.circle(b.sprite.x, b.sprite.y, 5 + Math.random() * 3, 0xb8bcc4, 0.5).setDepth(14);
           this.tweens.add({ targets: puff, scale: 2.2, alpha: 0, duration: 650, onComplete: () => puff.destroy() });
         }
@@ -1007,7 +1029,8 @@ export class GameScene extends Phaser.Scene {
   }
 
   private impactEffect(x: number, y: number) {
-    for (let i = 0; i < 5; i++) {
+    const n = particleCount(5, 2);
+    for (let i = 0; i < n; i++) {
       const a = Math.random() * Math.PI * 2;
       const dist = 8 + Math.random() * 10;
       const p = this.add.circle(x, y, 2, 0x9aa3b5, 1).setDepth(16);
@@ -1063,7 +1086,7 @@ export class GameScene extends Phaser.Scene {
     this.tweens.add({ targets: fire, scale: 2.3, alpha: 0, duration: 420, ease: "Cubic.easeOut", onComplete: () => fire.destroy() });
     const ring = this.add.circle(x, y, radius * 0.3).setStrokeStyle(4, 0xffd27a, 0.9).setDepth(26);
     this.tweens.add({ targets: ring, scale: 1 / 0.3, alpha: 0, duration: 320, ease: "Cubic.easeOut", onComplete: () => ring.destroy() });
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0, n = particleCount(10, 3); i < n; i++) {
       const a = Math.random() * Math.PI * 2;
       const d = radius * (0.2 + Math.random() * 0.5);
       const smoke = this.add.circle(x, y, 10 + Math.random() * 10, Math.random() < 0.5 ? 0x5a5e66 : 0x8a8f99, 0.55).setDepth(25);
@@ -1078,7 +1101,7 @@ export class GameScene extends Phaser.Scene {
         onComplete: () => smoke.destroy(),
       });
     }
-    for (let i = 0; i < 14; i++) {
+    for (let i = 0, n = particleCount(14, 4); i < n; i++) {
       const a = Math.random() * Math.PI * 2;
       const d = radius * (0.5 + Math.random() * 0.7);
       const bit = this.add.circle(x, y, 1.5 + Math.random() * 2, Math.random() < 0.5 ? 0x2b2b2b : 0xffb347, 1).setDepth(26);
@@ -1147,49 +1170,31 @@ export class GameScene extends Phaser.Scene {
 
   private addItem(id: string, data: ItemData) {
     const glowColor = itemGlow(data.kind, data.weapon);
-    const glow = this.add.circle(0, 0, 22, glowColor, 0.18).setStrokeStyle(1.5, glowColor, 0.6);
-    const g = this.add.graphics();
+    const glow = this.add.image(0, 0, glowTexture(this, glowColor)).setScale(1 / ITEM_RES);
+    // The icon is a texture baked once per item type and shared (see itemTexture below).
+    const icon = this.add.image(0, 0, itemTexture(this, data.kind, data.weapon)).setScale(1 / ITEM_RES);
+    if (data.kind === "weapon") icon.setRotation(-0.5); // at a slight angle, like it was dropped
 
-    if (data.kind === "weapon") {
-      // Draw the weapon centered, at a slight angle, like it was dropped.
-      g.setRotation(-0.5);
-      const shift =
-        data.weapon === "sword" || data.weapon === "axe" ? -30 : data.weapon === "bazooka" ? -20 : data.weapon === "sniper" ? -22 : -18;
-      drawWeaponShape(g, data.weapon as WeaponId, shift, -9);
-    } else if (data.kind === "vest") {
-      drawVestIcon(g);
-    } else if (data.kind === "boots") {
-      drawBootsIcon(g);
-    } else if (data.kind === "medkit") {
-      g.fillStyle(0x000000, 0.3);
-      g.fillRoundedRect(-10, -7, 24, 18, 4);
-      g.fillStyle(0xf2f2f2, 1);
-      g.fillRoundedRect(-12, -10, 24, 18, 4);
-      g.lineStyle(1.5, 0xb8b8b8, 1);
-      g.strokeRoundedRect(-12, -10, 24, 18, 4);
-      g.fillStyle(0xd62828, 1);
-      g.fillRect(-2.5, -7, 5, 12);
-      g.fillRect(-6.5, -3, 13, 4);
-    } else {
-      // Ammo box
-      g.fillStyle(0x000000, 0.3);
-      g.fillRoundedRect(-11, -6, 26, 18, 3);
-      g.fillStyle(0x4f5b2e, 1);
-      g.fillRoundedRect(-13, -9, 26, 18, 3);
-      g.lineStyle(2, 0x2f371b, 1);
-      g.strokeRoundedRect(-13, -9, 26, 18, 3);
-      g.lineBetween(-13, 0, 13, 0);
-      for (let i = -1; i <= 1; i++) {
-        g.fillStyle(0xd9a441, 1);
-        g.fillRect(i * 6 - 1.5, -6, 3, 10);
-        g.fillStyle(0xb0b6c0, 1);
-        g.fillRect(i * 6 - 1.5, -8, 3, 3);
-      }
-    }
+    const obj = this.add.container(data.x, data.y, [glow, icon]).setDepth(5);
+    // The glow pulses (see updateItems); each item starts at its own point of the pulse.
+    this.items.set(id, { obj, data, glow, phase: Math.random() * GLOW_PULSE_MS * 2 });
+  }
 
-    const obj = this.add.container(data.x, data.y, [glow, g]).setDepth(5);
-    this.tweens.add({ targets: glow, scale: 1.15, alpha: 0.6, duration: 800, yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
-    this.items.set(id, { obj, data });
+  /**
+   * Every frame: hide items that are off screen (nothing to draw), and pulse the glow of the
+   * visible ones. Same look as a yoyo "Sine.easeInOut" tween (to 1.15× size, 0.6 alpha over
+   * GLOW_PULSE_MS), without ~100 separate tweens running.
+   */
+  private updateItems(time: number) {
+    const v = this.cameras.main.worldView;
+    const m = 60; // an item's glow is ~25 px: keep a margin so nothing pops in at the edge
+    this.items.forEach((it) => {
+      const onScreen = it.data.x > v.x - m && it.data.x < v.right + m && it.data.y > v.y - m && it.data.y < v.bottom + m;
+      it.obj.setVisible(onScreen);
+      if (!onScreen) return;
+      const k = (1 - Math.cos((Math.PI * (time + it.phase)) / GLOW_PULSE_MS)) / 2; // 0 → 1 → 0, eased
+      it.glow.setScale((1 + 0.15 * k) / ITEM_RES).setAlpha(1 - 0.4 * k);
+    });
   }
 
   private removeItem(id: string) {
@@ -1270,4 +1275,75 @@ export class GameScene extends Phaser.Scene {
 function formatTime(totalSeconds: number): string {
   const s = Math.max(0, Math.floor(totalSeconds));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/** Item icons are baked at this many pixels per world pixel. */
+const ITEM_RES = 2;
+/** Half a glow pulse (grow), in ms; the other half shrinks back. */
+const GLOW_PULSE_MS = 800;
+
+/** The soft ring under an item (r 22, faint fill + brighter outline), baked once per color. */
+function glowTexture(scene: Phaser.Scene, color: number): string {
+  const key = `item-glow-${color.toString(16)}`;
+  bakeShape(scene, key, 48, 48, ITEM_RES, (g) => {
+    g.fillStyle(color, 0.18);
+    g.fillCircle(0, 0, 22);
+    g.lineStyle(1.5, color, 0.6);
+    g.strokeCircle(0, 0, 22);
+  });
+  return key;
+}
+
+/**
+ * Texture key for an item lying on the ground, baked on first use and shared by every item
+ * of that kind (a live Graphics per item would be redrawn every frame: ~100 items on the map).
+ * Each drawing is centered on (0, 0) inside its box.
+ */
+function itemTexture(scene: Phaser.Scene, kind: string, weapon: string): string {
+  if (kind === "weapon") {
+    const key = `item-weapon-${weapon}`;
+    // Weapons are drawn shifted so their middle sits near (0, 0): x within ±42, y within ±17.
+    const shift = weapon === "sword" || weapon === "axe" ? -30 : weapon === "bazooka" ? -20 : weapon === "sniper" ? -22 : -18;
+    bakeShape(scene, key, 84, 34, ITEM_RES, (g) => drawWeaponShape(g, weapon as WeaponId, shift, -9));
+    return key;
+  }
+  if (kind === "vest") {
+    bakeShape(scene, "item-vest", 26, 32, ITEM_RES, drawVestIcon);
+    return "item-vest";
+  }
+  if (kind === "boots") {
+    bakeShape(scene, "item-boots", 38, 28, ITEM_RES, drawBootsIcon);
+    return "item-boots";
+  }
+  if (kind === "medkit") {
+    bakeShape(scene, "item-medkit", 30, 24, ITEM_RES, (g) => {
+      g.fillStyle(0x000000, 0.3);
+      g.fillRoundedRect(-10, -7, 24, 18, 4);
+      g.fillStyle(0xf2f2f2, 1);
+      g.fillRoundedRect(-12, -10, 24, 18, 4);
+      g.lineStyle(1.5, 0xb8b8b8, 1);
+      g.strokeRoundedRect(-12, -10, 24, 18, 4);
+      g.fillStyle(0xd62828, 1);
+      g.fillRect(-2.5, -7, 5, 12);
+      g.fillRect(-6.5, -3, 13, 4);
+    });
+    return "item-medkit";
+  }
+  // Ammo box
+  bakeShape(scene, "item-ammo", 32, 26, ITEM_RES, (g) => {
+    g.fillStyle(0x000000, 0.3);
+    g.fillRoundedRect(-11, -6, 26, 18, 3);
+    g.fillStyle(0x4f5b2e, 1);
+    g.fillRoundedRect(-13, -9, 26, 18, 3);
+    g.lineStyle(2, 0x2f371b, 1);
+    g.strokeRoundedRect(-13, -9, 26, 18, 3);
+    g.lineBetween(-13, 0, 13, 0);
+    for (let i = -1; i <= 1; i++) {
+      g.fillStyle(0xd9a441, 1);
+      g.fillRect(i * 6 - 1.5, -6, 3, 10);
+      g.fillStyle(0xb0b6c0, 1);
+      g.fillRect(i * 6 - 1.5, -8, 3, 3);
+    }
+  });
+  return "item-ammo";
 }

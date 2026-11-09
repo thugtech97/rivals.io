@@ -518,6 +518,12 @@ input:focus {
 .icon-btn:hover {
   border-color: var(--accent-2);
 }
+/* Narrow screens: just "Low" / "Medium" / "High" so the toolbar stays small. */
+@media (max-width: 900px) {
+  .quality-prefix {
+    display: none;
+  }
+}
 .icon-btn.leave-btn:hover {
   border-color: var(--accent);
   color: #ff8a9a;

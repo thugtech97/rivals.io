@@ -2,6 +2,8 @@
 // World sounds take an (x, y): they get quieter with distance from the listener
 // (your soldier, or whoever you're spectating) and pan left/right by direction.
 
+import { qualitySettings } from "./quality";
+
 const HEAR_FULL = 180; // px: full volume up to here...
 const HEAR_MAX = 1300; // ...silent beyond this
 const MUTE_KEY = "rivals:muted";
@@ -77,7 +79,7 @@ export class Sfx {
   /** Each gun has its own voice: pistol pop, rifle crack, machine gun rattle, sniper boom. */
   gunshot(x: number, y: number, mine: boolean, weapon = "rifle") {
     const v = GUN_VOICES[weapon] ?? GUN_VOICES.rifle;
-    const out = this.at(x, y, (mine ? 0.55 : 0.45) * v.vol, v.reach);
+    const out = this.at(x, y, (mine ? 0.55 : 0.45) * v.vol, v.reach, mine);
     if (!out) return;
     const { ctx, node, t } = out;
     // Sharp crack
@@ -98,7 +100,7 @@ export class Sfx {
 
   /** A rocket or grenade going off: a big boom that carries far. */
   explosion(x: number, y: number) {
-    const out = this.at(x, y, 1, 2.2);
+    const out = this.at(x, y, 1, 2.2, true);
     if (!out) return;
     const { ctx, node, t } = out;
     const far = this.distance(x, y) / (HEAR_MAX * 2.2);
@@ -243,7 +245,7 @@ export class Sfx {
   // ---------- Movement & items ----------
 
   footstep(x: number, y: number, mine: boolean) {
-    const out = this.at(x, y, mine ? 0.22 : 0.16);
+    const out = this.at(x, y, mine ? 0.22 : 0.16, 1, mine);
     if (!out) return;
     this.noiseHit(out.node, out.t, { type: "lowpass", freq: 380 + Math.random() * 260, vol: 1, decay: 0.07 });
     this.noiseHit(out.node, out.t + 0.01, { type: "bandpass", freq: 1800, vol: 0.12, decay: 0.03 }); // grit
@@ -298,12 +300,17 @@ export class Sfx {
 
   // ---------- Building blocks ----------
 
-  /** A world sound at (x, y): returns where to connect it, or null if muted / too far. */
-  private at(x: number, y: number, vol: number, reach = 1) {
+  /**
+   * A world sound at (x, y): returns where to connect it, or null if muted / too far / too
+   * many sounds started in the last 100 ms. `important` sounds (your own shots, explosions)
+   * always play; the budget only drops the extras in a big firefight (cheaper on phones).
+   */
+  private at(x: number, y: number, vol: number, reach = 1, important = false) {
     if (!this.ctx || this.muted) return null;
     const d = this.distance(x, y);
     const max = HEAR_MAX * reach; // loud things (a sniper) carry further
     if (d >= max) return null;
+    if (!this.takeVoice(important)) return null;
     const fall = d <= HEAR_FULL ? 1 : 1 - (d - HEAR_FULL) / (max - HEAR_FULL);
     const g = this.ctx.createGain();
     g.gain.value = vol * fall * fall;
@@ -315,6 +322,17 @@ export class Sfx {
       g.connect(this.master);
     }
     return { ctx: this.ctx, node: g as AudioNode, t: this.ctx.currentTime };
+  }
+
+  /** Start times (audio clock, seconds) of the world sounds played in the last 100 ms. */
+  private recentVoices: number[] = [];
+
+  private takeVoice(important: boolean): boolean {
+    const now = this.ctx!.currentTime;
+    while (this.recentVoices.length && now - this.recentVoices[0] > 0.1) this.recentVoices.shift();
+    if (!important && this.recentVoices.length >= qualitySettings().soundsPer100ms) return false;
+    this.recentVoices.push(now);
+    return true;
   }
 
   /** A sound "in your head" (UI / your own gear): no distance, no panning. */

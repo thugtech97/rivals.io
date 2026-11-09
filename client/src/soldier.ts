@@ -1,11 +1,15 @@
 import Phaser from "phaser";
 import { PLAYER_MAX_HP } from "../../shared/constants";
 import type { WeaponId } from "../../shared/weapons";
+import { bakeShape } from "./atlas";
 
 // A top-down soldier, drawn facing RIGHT (angle 0). The whole `body` container is
 // rotated to the aim angle; the name and health bar live outside it so they stay upright.
 //
 // body layers (bottom → top): base (shadow, backpack, torso) · vest · arms + weapon · helmet
+//
+// Each layer is an Image cut from a texture baked ONCE per look (color, weapon) and shared
+// by every soldier: live Graphics would be re-triangulated every frame (~500 commands each).
 
 const SKIN = 0xe2b48c;
 const GUN_DARK = 0x1b1e24;
@@ -16,12 +20,29 @@ const WOOD = 0x8a5a2b;
 
 type G = Phaser.GameObjects.Graphics;
 
+/** Soldier textures are baked at this many pixels per world pixel (sharp at the camera's zoom). */
+const SOLDIER_RES = 2;
+
+/** A baked soldier layer as an image whose center is the soldier's center. */
+function layer(scene: Phaser.Scene, key: string, w: number, h: number, draw: (g: G) => void): Phaser.GameObjects.Image {
+  bakeShape(scene, key, w, h, SOLDIER_RES, draw);
+  return scene.add.image(0, 0, key).setScale(1 / SOLDIER_RES);
+}
+
+/** Texture key for arms holding `weapon` in uniform `color` (baked on first use). */
+function armsKey(scene: Phaser.Scene, weapon: WeaponId, color: number): string {
+  const key = `soldier-arms-${weapon}-${color.toString(16)}`;
+  // Reach: x from -6 (shoulders) to 62 (sword tip), y ±26 (axe blade): a box centered on (0, 0).
+  bakeShape(scene, key, 132, 56, SOLDIER_RES, (g) => drawArmsWithWeapon(g, weapon, color));
+  return key;
+}
+
 export interface SoldierView {
   root: Phaser.GameObjects.Container;
   body: Phaser.GameObjects.Container;
-  /** Arms + weapon; redrawn when the weapon in hand changes, rotated for melee swings. */
-  arms: G;
-  vest: G;
+  /** Arms + weapon; swapped when the weapon in hand changes, rotated for melee swings. */
+  arms: Phaser.GameObjects.Image;
+  vest: Phaser.GameObjects.Image;
   hitFlash: Phaser.GameObjects.Arc;
   hpBar: G;
   label: Phaser.GameObjects.Text;
@@ -37,14 +58,12 @@ export function createSoldier(
   name: string,
   isMe: boolean,
 ): SoldierView {
-  const base = scene.add.graphics();
-  drawBase(base, color, isMe);
-  const vest = scene.add.graphics();
-  drawVest(vest);
-  vest.setVisible(false);
-  const arms = scene.add.graphics();
-  const head = scene.add.graphics();
-  drawHelmet(head, color);
+  const hex = color.toString(16);
+  // Shadow ellipse, "you" ring (r 27) and torso all fit in ±29.
+  const base = layer(scene, `soldier-base-${hex}-${isMe ? "me" : "them"}`, 60, 60, (g) => drawBase(g, color, isMe));
+  const vest = layer(scene, "soldier-vest", 28, 34, drawVest).setVisible(false);
+  const arms = scene.add.image(0, 0, armsKey(scene, "fists", color)).setScale(1 / SOLDIER_RES);
+  const head = layer(scene, `soldier-head-${hex}`, 26, 26, (g) => drawHelmet(g, color));
 
   // Red overlay that flashes when hit.
   const hitFlash = scene.add.circle(0, 0, 22, 0xff3030, 1).setAlpha(0);
@@ -77,9 +96,8 @@ export function createSoldier(
 export function setSoldierWeapon(view: SoldierView, weapon: string) {
   if (view.weapon === weapon) return;
   view.weapon = weapon;
-  view.arms.clear();
   view.arms.setRotation(0);
-  drawArmsWithWeapon(view.arms, (weapon || "fists") as WeaponId, view.color);
+  view.arms.setTexture(armsKey(view.arms.scene, (weapon || "fists") as WeaponId, view.color));
 }
 
 export function setSoldierVest(view: SoldierView, wearing: boolean) {

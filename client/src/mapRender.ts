@@ -11,6 +11,13 @@ import {
   type RectObstacle,
 } from "../../shared/map";
 import { shade } from "./soldier";
+import { bakeAtlas } from "./atlas";
+
+export interface RenderedMap {
+  objects: Phaser.GameObjects.GameObject[];
+  /** Texture keys made for this map (remove them when the map is replaced). */
+  textures: string[];
+}
 
 /** Decoration density is tuned per 2000×2000 area and scaled to the real map size. */
 const DENSITY = (ARENA_SIZE / 2000) ** 2;
@@ -21,10 +28,12 @@ type G = Phaser.GameObjects.Graphics;
  * Draws the whole arena once into textures (fast to render every frame).
  * `resolution` > 1 bakes extra detail so it stays sharp when the camera zooms in.
  * Tree canopies go on a separate layer above the soldiers.
- * Returns everything it created, so the map can be swapped for a new one.
+ * Returns everything it created (game objects, plus texture keys to remove), so the map
+ * can be swapped for a new one.
  */
-export function renderMap(scene: Phaser.Scene, map: GameMap, resolution: number): Phaser.GameObjects.GameObject[] {
+export function renderMap(scene: Phaser.Scene, map: GameMap, resolution: number): RenderedMap {
   const created: Phaser.GameObjects.GameObject[] = [];
+  const textures: string[] = [];
   const g = scene.add.graphics();
   g.setScale(resolution);
 
@@ -55,9 +64,22 @@ export function renderMap(scene: Phaser.Scene, map: GameMap, resolution: number)
   }
   g.destroy();
 
-  // Canopies stay as live vector graphics (crisp, only a few hundred shapes).
-  const canopy = scene.add.graphics().setDepth(30);
-  for (const o of map.obstacles) if (o.kind === "circle" && o.style === "tree") drawTree(canopy, o, rng);
+  // Tree canopies sit above the soldiers. Baked once into one small texture (one image per
+  // tree) instead of a live Graphics, which Phaser would re-triangulate every frame.
+  const trees = map.obstacles.filter((o): o is CircleObstacle => o.kind === "circle" && o.style === "tree");
+  const canopyKey = `canopy-${map.seed}`;
+  const cells = trees.map((o) => {
+    const size = (o.r + 12) * 2 + 4; // canopy radius is trunk + 12, plus its outline
+    return { w: size, h: size, draw: (cg: G, cx: number, cy: number) => drawTree(cg, { ...o, x: cx, y: cy }, rng) };
+  });
+  if (bakeAtlas(scene, canopyKey, cells, resolution)) {
+    trees.forEach((o, i) => created.push(scene.add.image(o.x, o.y, canopyKey, String(i)).setScale(1 / resolution).setDepth(30)));
+    textures.push(canopyKey);
+  } else {
+    const canopy = scene.add.graphics().setDepth(30); // fallback: live vector graphics
+    for (const o of trees) drawTree(canopy, o, rng);
+    created.push(canopy);
+  }
 
   // Arena border wall
   const border = scene.add.graphics().setDepth(1);
@@ -66,8 +88,8 @@ export function renderMap(scene: Phaser.Scene, map: GameMap, resolution: number)
   border.lineStyle(3, 0x55504a, 1);
   border.strokeRect(-1, -1, ARENA_SIZE + 2, ARENA_SIZE + 2);
 
-  created.push(canopy, border);
-  return created;
+  created.push(border);
+  return { objects: created, textures };
 }
 
 // ---------- Ground ----------

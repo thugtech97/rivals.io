@@ -6,6 +6,7 @@ import { Hud } from "./hud";
 import { sfx } from "./sound";
 import { startLobbyBackdrop, stopLobbyBackdrop } from "./lobbyBackdrop";
 import { TouchControls } from "./touchControls";
+import { cycleQuality, getQuality, onQualityChange, QUALITY_LABEL, type Quality } from "./quality";
 import { ARENA_ROOM, IDLE_KICK_CODE, LOBBY_ROOM } from "../../shared/constants";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -25,6 +26,7 @@ const ui = {
   hudPlayers: $("hud-players"),
   leave: $<HTMLButtonElement>("leave"),
   mute: $<HTMLButtonElement>("mute"),
+  quality: $<HTMLButtonElement>("quality"),
   helpBtn: $<HTMLButtonElement>("help"),
   help: $("controls-help"),
   fullscreen: $<HTMLButtonElement>("fullscreen"),
@@ -397,6 +399,20 @@ function leaveGame() {
 }
 
 ui.leave.onclick = leaveGame;
+
+// Graphics quality Low / Medium / High (also the Q key in game). Remembered on this device.
+function showQuality(q: Quality) {
+  const prefix = document.createElement("span");
+  prefix.className = "quality-prefix";
+  prefix.textContent = "Quality: ";
+  ui.quality.replaceChildren(prefix, QUALITY_LABEL[q]);
+}
+ui.quality.onclick = () => {
+  cycleQuality();
+  ui.quality.blur(); // so Space / Enter don't press it again
+};
+onQualityChange(showQuality);
+showQuality(getQuality());
 
 // Sound on/off (also the M key in game)
 function showMute(muted: boolean) {

@@ -50,6 +50,8 @@ import {
   type WeaponId,
 } from "../../../shared/weapons";
 
+/** How often the synced state is sent to clients (ms). */
+const PATCH_MS = 1000 / 30;
 /** Bullets are checked every few pixels so they can't skip through thin barricades. */
 const BULLET_STEP_PX = 8;
 /** How close you must be to an item to pick it up. */
@@ -195,6 +197,9 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     }
 
     this.setSimulationInterval((dt) => this.tick(dt), TICK_MS);
+    // Send state 30×/s (Colyseus default is 20×/s): other players' positions arrive fresher,
+    // so they look less behind. Costs ~1.5× the (small) state bandwidth.
+    this.patchRate = PATCH_MS;
   }
 
   /** No joining a match that's already being played (the room is also locked then). */
