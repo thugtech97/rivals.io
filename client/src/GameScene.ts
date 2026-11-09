@@ -2,7 +2,7 @@ import Phaser from "phaser";
 import { Callbacks, type Room } from "@colyseus/sdk";
 import { ARENA_SIZE, MATCH_MIN_PLAYERS, PICKUP_RADIUS, PLAYER_MAX_HP, PLAYER_RADIUS, RESPAWN_MS } from "../../shared/constants";
 import { sfx } from "./sound";
-import { angleDelta, applyInput, isMoving, NO_INPUT, type InputState } from "../../shared/movement";
+import { angleDelta, applyInput, isMoving, muzzlePosition, NO_INPUT, type InputState } from "../../shared/movement";
 import type { BulletEndEvent, KillEvent, ShotEvent, SwingEvent } from "../../shared/messages";
 import {
   createSoldier,
@@ -93,12 +93,23 @@ interface PlayerView {
 
 interface BulletView {
   sprite: Phaser.GameObjects.Rectangle;
+  /** Where the server spawned it; the tracer follows the server's path from here. */
+  x0: number;
+  y0: number;
   vx: number;
   vy: number;
+  /** Gap between the gun tip on screen and the server's spawn point (fades out quickly). */
+  offX: number;
+  offY: number;
   bornAt: number;
   lifeMs: number;
   owner: string;
 }
+
+/** How long a tracer takes to slide from the on-screen gun tip onto the server's bullet path. */
+const TRACER_BLEND_MS = 120;
+/** A bigger gap than this means the shooter view is stale (respawn, teleport): don't fake it. */
+const TRACER_MAX_OFFSET_PX = 80;
 
 export interface GameSceneData {
   room: Room;
@@ -385,7 +396,7 @@ export class GameScene extends Phaser.Scene {
       }
     });
 
-    this.updateBullets(time, delta);
+    this.updateBullets(this.time.now);
     this.drawZone(smoothing);
     this.updateCamera(mine);
     this.updateItemLabel(mine);
@@ -832,16 +843,41 @@ export class GameScene extends Phaser.Scene {
     // Tracer: long and white for the sniper, thin for the machine gun
     const look =
       shot.weapon === "sniper" ? { len: 34, w: 3, c: 0xffffff } : shot.weapon === "mg" ? { len: 14, w: 2, c: 0xffd27a } : { len: 16, w: 3, c: 0xffe08a };
-    const sprite = this.add.rectangle(shot.x, shot.y, look.len, look.w, look.c).setRotation(shot.angle).setDepth(15);
-    this.bullets.set(shot.id, { sprite, vx, vy, bornAt: this.time.now, lifeMs: gun.bulletLifeMs, owner: shot.owner });
-    sfx.gunshot(shot.x, shot.y, shot.owner === this.room.sessionId, shot.weapon);
+    // The server fired from where IT thinks the shooter is, but on screen we draw ourselves
+    // ahead (prediction) and others behind (smoothing). Start the tracer and flash at the gun
+    // tip as drawn, then let the tracer slide onto the real path (hits are still server-side).
+    const shooter = this.views.get(shot.owner);
+    let startX = shot.x;
+    let startY = shot.y;
+    if (shooter?.soldier.root.visible) {
+      const s = shooter.soldier;
+      const tip = muzzlePosition({ x: s.root.x + s.body.x, y: s.root.y + s.body.y }, s.body.rotation, gun.muzzle);
+      if (Math.hypot(tip.x - shot.x, tip.y - shot.y) <= TRACER_MAX_OFFSET_PX) {
+        startX = tip.x;
+        startY = tip.y;
+      }
+    }
+
+    const sprite = this.add.rectangle(startX, startY, look.len, look.w, look.c).setRotation(shot.angle).setDepth(15);
+    this.bullets.set(shot.id, {
+      sprite,
+      x0: shot.x,
+      y0: shot.y,
+      vx,
+      vy,
+      offX: startX - shot.x,
+      offY: startY - shot.y,
+      bornAt: this.time.now,
+      lifeMs: gun.bulletLifeMs,
+      owner: shot.owner,
+    });
+    sfx.gunshot(startX, startY, shot.owner === this.room.sessionId, shot.weapon);
 
     // Muzzle flash (bigger for the sniper)
-    const flash = this.add.circle(shot.x, shot.y, shot.weapon === "sniper" ? 12 : shot.weapon === "pistol" ? 5 : 7, 0xfff1b0, 1).setDepth(25);
+    const flash = this.add.circle(startX, startY, shot.weapon === "sniper" ? 12 : shot.weapon === "pistol" ? 5 : 7, 0xfff1b0, 1).setDepth(25);
     this.tweens.add({ targets: flash, scale: 0.2, alpha: 0, duration: 70, onComplete: () => flash.destroy() });
 
     // Recoil kick on the shooter
-    const shooter = this.views.get(shot.owner);
     if (shooter) {
       const kick = shot.weapon === "sniper" ? 5 : 2;
       const body = shooter.soldier.body;
@@ -857,11 +893,14 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private updateBullets(time: number, delta: number) {
-    const dt = delta / 1000;
+  private updateBullets(time: number) {
     this.bullets.forEach((b, id) => {
-      b.sprite.x += b.vx * dt;
-      b.sprite.y += b.vy * dt;
+      const age = time - b.bornAt;
+      // Position on the server's path, plus the on-screen gap fading to zero (ease-out).
+      const t = Math.min(1, age / TRACER_BLEND_MS);
+      const gap = (1 - t) * (1 - t);
+      b.sprite.x = b.x0 + b.vx * (age / 1000) + b.offX * gap;
+      b.sprite.y = b.y0 + b.vy * (age / 1000) + b.offY * gap;
       // Safety net in case the server's "bulletEnd" never arrives.
       if (time - b.bornAt > b.lifeMs + 500) {
         b.sprite.destroy();
