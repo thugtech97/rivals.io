@@ -609,8 +609,12 @@ export class GameScene extends Phaser.Scene {
   private zoneText(): { text: string; urgent: boolean } {
     const st = this.room.state;
     switch (this.phase) {
-      case "warmup":
-        return { text: `Waiting for players… (${this.views.size}/${MATCH_MIN_PLAYERS}) · warm up!`, urgent: false };
+      case "warmup": {
+        const max = Number(st.maxPlayers) || MATCH_MIN_PLAYERS;
+        const count = `Waiting for players… (${this.views.size}/${max})`;
+        if (this.views.size < MATCH_MIN_PLAYERS) return { text: `${count} · warm up!`, urgent: false };
+        return { text: `${count} · match starts when full or in ${formatTime(Number(st.phaseSecondsLeft ?? 0))}`, urgent: false };
+      }
       case "countdown":
         return { text: `Match starts in ${st.phaseSecondsLeft}…`, urgent: true };
       case "ended":

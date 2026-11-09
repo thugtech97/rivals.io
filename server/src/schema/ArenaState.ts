@@ -91,16 +91,19 @@ export class Zone extends Schema {
 
 export class ArenaState extends Schema {
   @type("string") roomName = "";
+  /** Room capacity (the lobby's "max players"). */
+  @type("number") maxPlayers = 0;
   /** Clients build the same random map from this seed (see shared/map.ts). */
   @type("number") mapSeed = 0;
   /**
-   * "warmup"    fewer than MATCH_MIN_PLAYERS: practice, dead players respawn
-   * "countdown" enough players: "Match starts in 5…"
+   * "warmup"    practice, dead players respawn; waits for the room to fill
+   *             (or MATCH_FILL_WAIT_MS once MATCH_MIN_PLAYERS are in)
+   * "countdown" room full / wait over: "Match starts in 5…"
    * "live"      the match: no respawns, the zone runs
    * "ended"     one player left: winner banner, then back to warmup
    */
   @type("string") matchPhase = "warmup";
-  /** Whole seconds left in the countdown / winner banner. */
+  /** Whole seconds left in the countdown / winner banner / warmup fill wait (0 = not waiting). */
   @type("number") phaseSecondsLeft = 0;
   /** sessionId of the last player alive ("" if nobody survived). */
   @type("string") winner = "";

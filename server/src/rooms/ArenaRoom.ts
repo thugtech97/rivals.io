@@ -14,6 +14,7 @@ import {
   TICK_MS,
   MATCH_COUNTDOWN_MS,
   MATCH_END_MS,
+  MATCH_FILL_WAIT_MS,
   MATCH_MIN_PLAYERS,
   ZONE_DAMAGE_PER_SEC,
   ZONE_HOLD_MS,
@@ -59,6 +60,8 @@ const zoneHoldMs = Number(process.env.ZONE_HOLD_MS) || ZONE_HOLD_MS;
 const zoneShrinkMs = Number(process.env.ZONE_SHRINK_MS) || ZONE_SHRINK_MS;
 /** AFK kick timeout (IDLE_KICK_MS env var is only for quick local testing). */
 const idleKickMs = Number(process.env.IDLE_KICK_MS) || IDLE_KICK_MS;
+/** Warmup wait for a room that isn't full (MATCH_FILL_WAIT_MS env var is only for quick local testing). */
+const fillWaitMs = Number(process.env.MATCH_FILL_WAIT_MS) || MATCH_FILL_WAIT_MS;
 /** TEST_HOOKS=1 enables a "debugTeleport" message for automated tests. Never set it in production. */
 const TEST_HOOKS = process.env.TEST_HOOKS === "1";
 
@@ -97,6 +100,8 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
   private matchStart = 0;
   /** When the countdown / winner banner ends. */
   private phaseEndsAt = 0;
+  /** Warmup: when the match starts even if the room isn't full (0 = not enough players yet). */
+  private fillDeadline = 0;
   /** This room's map. A new random one is generated for every match. */
   private map!: GameMap;
 
@@ -108,6 +113,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
     const requested = Math.round(Number(options.maxPlayers) || DEFAULT_PLAYERS_PER_ROOM);
     this.maxClients = clamp(requested, MIN_PLAYERS_PER_ROOM, MAX_PLAYERS_PER_ROOM);
+    this.state.maxPlayers = this.maxClients;
 
     const hostName = cleanText(options.playerName, NAME_MAX_LENGTH) || "Someone";
     const roomName = cleanText(options.roomName, ROOM_NAME_MAX_LENGTH) || `${hostName}'s arena`;
@@ -643,7 +649,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
   // ---------- Match flow ----------
   //
-  //  warmup ──(2+ players)──▶ countdown 5s ──▶ live (no respawns, zone runs)
+  //  warmup ──(room full, or 2+ players for 60s)──▶ countdown 5s ──▶ live (no respawns, zone runs)
   //     ▲                        │ (someone left, <2)          │ (≤1 alive)
   //     └────────────────────────┘                              ▼
   //     └──────────────── 8s winner banner ◀──────────────── ended
@@ -655,15 +661,23 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
     switch (s.matchPhase) {
       case "warmup":
-        if (players >= MATCH_MIN_PLAYERS) {
+        // Keep the room open until it's full. If it never fills, start anyway after a while.
+        if (players < MATCH_MIN_PLAYERS) {
+          this.fillDeadline = 0;
+        } else if (!this.fillDeadline) {
+          this.fillDeadline = now + fillWaitMs;
+        }
+        if (players >= MATCH_MIN_PLAYERS && (players >= this.maxClients || now >= this.fillDeadline)) {
           s.matchPhase = "countdown";
           this.phaseEndsAt = now + MATCH_COUNTDOWN_MS;
+          this.fillDeadline = 0;
         }
         break;
 
       case "countdown":
         if (players < MATCH_MIN_PLAYERS) {
           s.matchPhase = "warmup";
+          this.fillDeadline = 0;
         } else if (now >= this.phaseEndsAt) {
           this.startMatch(now);
         }
@@ -678,8 +692,8 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
         break;
     }
 
-    s.phaseSecondsLeft =
-      s.matchPhase === "countdown" || s.matchPhase === "ended" ? Math.max(0, Math.ceil((this.phaseEndsAt - now) / 1000)) : 0;
+    const endsAt = s.matchPhase === "countdown" || s.matchPhase === "ended" ? this.phaseEndsAt : s.matchPhase === "warmup" ? this.fillDeadline : 0;
+    s.phaseSecondsLeft = endsAt ? Math.max(0, Math.ceil((endsAt - now) / 1000)) : 0;
   }
 
   private startMatch(now: number) {
@@ -723,6 +737,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
   private backToWarmup() {
     const s = this.state;
     s.matchPhase = "warmup";
+    this.fillDeadline = 0;
     s.winner = "";
     s.matchSeconds = 0;
     this.resetZone();

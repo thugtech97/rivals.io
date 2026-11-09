@@ -32,8 +32,13 @@ export const PICKUP_RADIUS = 14;
 
 // ---------- Match (last player alive wins) ----------
 
-/** A match starts once this many players are in the room. */
+/** A match needs at least this many players. */
 export const MATCH_MIN_PLAYERS = 2;
+/**
+ * The room keeps taking players until it's full; a full room starts the countdown right away.
+ * If it never fills, the match starts anyway this long after MATCH_MIN_PLAYERS are in.
+ */
+export const MATCH_FILL_WAIT_MS = 60_000;
 /** "Match starts in 5…" */
 export const MATCH_COUNTDOWN_MS = 5000;
 /** How long the winner banner shows before the room goes back to warmup. */
