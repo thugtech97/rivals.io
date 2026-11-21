@@ -10,7 +10,7 @@ import { BASE_CLEAR_RADIUS, BASES, CORE_RADIUS, TEAMS, type GameMode } from "./t
 //   • which theme (forest, town, farm, …) goes in which block
 //   • each block's layout is rotated / mirrored at random
 //   • trees are scattered fresh
-//   • parked cars and crossroads barriers move around
+//   • crossroads barriers move around (the roads have rideable vehicles instead, see shared/vehicles.ts)
 //
 //          x: 0 ──── 940 ═ 1060 ──── 2000 ═ 2120 ──── 3060
 //   y: 0      ┌────────╥────────────╥────────────┐
@@ -23,7 +23,6 @@ import { BASE_CLEAR_RADIUS, BASES, CORE_RADIUS, TEAMS, type GameMode } from "./t
 
 export type RectStyle =
   | "building"
-  | "car"
   | "barrier" // concrete jersey barrier
   | "sandbag"
   | "container"
@@ -358,7 +357,7 @@ export class GameMap {
       blocks.push({ theme, area: { x: ox, y: oy, w: BLOCK_SIZE, h: BLOCK_SIZE } });
     });
 
-    // 3. Streets: barriers at each crossroads (2 of 4 lanes) and parked cars.
+    // 3. Streets: barriers at each crossroads (2 of 4 lanes).
     this.placeStreetCover(rng);
 
     // 4. Trees, scattered fresh inside each block (never in crop fields).
@@ -388,25 +387,6 @@ export class GameMap {
       ];
       for (let k = 0; k < 2; k++) this.obstacles.push(options.splice(Math.floor(rng() * options.length), 1)[0]);
     }
-
-    const colors = [0xc0392b, 0xe8e8e8, 0x2e6fb7, 0x27ae60, 0x7f8c8d, 0xe67e22, 0xf1c40f, 0x8e44ad, 0x16a085];
-    const cars: RectObstacle[] = [];
-    for (let tries = 0; cars.length < 8 && tries < 400; tries++) {
-      const c = ROAD_CENTERS[Math.floor(rng() * 2)];
-      const horizontal = rng() < 0.5;
-      const lane = rng() < 0.5 ? c - 50 : c + 12; // which side of the yellow line
-      const along = 40 + rng() * (ARENA_SIZE - 166);
-      // Keep crossroads clear, and don't park on top of another car.
-      if (ROAD_CENTERS.some((rc) => Math.abs(along + 43 - rc) < 230)) continue;
-      const car = horizontal
-        ? rect("car", along, lane, 86, 40, colors[Math.floor(rng() * colors.length)])
-        : rect("car", lane, along, 40, 86, colors[Math.floor(rng() * colors.length)]);
-      const clash = cars.some(
-        (o) => o.x < car.x + car.w + 60 && car.x < o.x + o.w + 60 && o.y < car.y + car.h + 60 && car.y < o.y + o.h + 60,
-      );
-      if (!clash) cars.push(car);
-    }
-    this.obstacles.push(...cars);
   }
 
   private scatterTrees(area: Rect, count: number, avoid: Rect[], rng: () => number) {

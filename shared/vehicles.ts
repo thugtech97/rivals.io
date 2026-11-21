@@ -18,8 +18,9 @@ export interface VehicleStats {
 }
 
 export const VEHICLES: Record<VehicleKind, VehicleStats> = {
-  bike: { name: "Motorbike", speedMul: 2, radius: 20, ramDamage: 0, length: 46, width: 18 },
-  car: { name: "Car", speedMul: 1.65, radius: 28, ramDamage: 30, length: 66, width: 36 },
+  // Sized so they clearly stick out from under the rider (a soldier is 40px across).
+  bike: { name: "Motorbike", speedMul: 2, radius: 24, ramDamage: 0, length: 62, width: 24 },
+  car: { name: "Car", speedMul: 1.65, radius: 34, ramDamage: 30, length: 88, width: 48 },
 };
 
 /** How close (from the vehicle's edge) you must stand to get on. */

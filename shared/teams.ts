@@ -46,5 +46,13 @@ export const TURRET_RANGE = 650;
 /** Dead players come back at their base after this long (during a team match). */
 export const TEAM_RESPAWN_MS = 5000;
 
+/**
+ * Ammo resupply (team matches only, since players keep respawning): every AMMO_RESUPPLY_MS,
+ * if fewer ammo boxes are lying around than this fraction of what the match started with,
+ * one more drops in somewhere random (never inside a base).
+ */
+export const AMMO_RESUPPLY_MS = 10_000;
+export const AMMO_RESUPPLY_MIN_FRACTION = 0.5;
+
 /** Extra room seats for people who only watch (they don't count as players). */
 export const MAX_SPECTATORS = 8;

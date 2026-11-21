@@ -3,7 +3,16 @@ import { Callbacks, type Room } from "@colyseus/sdk";
 import { ARENA_SIZE, MATCH_MIN_PLAYERS, PICKUP_RADIUS, PLAYER_MAX_HP, PLAYER_RADIUS, RESPAWN_MS } from "../../shared/constants";
 import { sfx } from "./sound";
 import { angleDelta, applyInput, isMoving, muzzlePosition, NO_INPUT, type InputState } from "../../shared/movement";
-import type { BulletEndEvent, CoreDestroyedEvent, ExplosionEvent, KillEvent, RamEvent, ShotEvent, SwingEvent } from "../../shared/messages";
+import type {
+  BulletEndEvent,
+  CoreDestroyedEvent,
+  ExplosionEvent,
+  KillEvent,
+  RamEvent,
+  ShotEvent,
+  SupplyDropEvent,
+  SwingEvent,
+} from "../../shared/messages";
 import { isVehicleKind, VEHICLE_REACH, VEHICLE_TURN_PER_SEC, VEHICLES, type VehicleKind } from "../../shared/vehicles";
 import type { CircleObstacle } from "../../shared/map";
 import {
@@ -246,6 +255,8 @@ export class GameScene extends Phaser.Scene {
   /** Team mode: the two bases. */
   private cores = new Map<string, CoreView>();
   private vehicles = new Map<string, VehicleView>();
+  /** Ammo boxes announced as dropping in (team resupply), animated when they appear. */
+  private incomingDrops = new Set<string>();
   /** Canopies currently shaking (or settling back down). */
   private shaking = new Map<CircleObstacle, ShakingTree>();
   private bullets = new Map<number, BulletView>();
@@ -307,6 +318,7 @@ export class GameScene extends Phaser.Scene {
     this.cores.clear();
     this.vehicles.clear();
     this.shaking.clear();
+    this.incomingDrops.clear();
     this.map = undefined;
     this.rendered = { objects: [], textures: [], canopies: new Map() };
     this.killedBy = "";
@@ -423,6 +435,12 @@ export class GameScene extends Phaser.Scene {
       this.vehicles.delete(key as string);
     });
     this.room.onMessage("ram", (ev: RamEvent) => this.ramEffect(ev));
+    this.room.onMessage("supplyDrop", (ev: SupplyDropEvent) => {
+      // Usually arrives just before the box itself (state is sent a moment later).
+      const it = this.items.get(ev.id);
+      if (it) this.dropInEffect(it.obj);
+      else this.incomingDrops.add(ev.id);
+    });
 
     // Team mode: the two bases.
     $.onAdd("cores", (core, key) => this.addCore(key as string, core as unknown as CoreData));
@@ -1751,6 +1769,40 @@ export class GameScene extends Phaser.Scene {
     const obj = this.add.container(data.x, data.y, [glow, icon]).setDepth(5);
     // The glow pulses (see updateItems); each item starts at its own point of the pulse.
     this.items.set(id, { obj, data, glow, phase: Math.random() * GLOW_PULSE_MS * 2 });
+    if (this.incomingDrops.delete(id)) this.dropInEffect(obj);
+  }
+
+  /** A resupply box falling in from above: it shrinks onto the ground, a puff of dust and a thud. */
+  private dropInEffect(obj: Phaser.GameObjects.Container) {
+    const { x, y } = obj;
+    const shadow = this.add.ellipse(x, y + 4, 30, 14, 0x000000, 0.35).setDepth(4).setScale(0.3);
+    this.tweens.add({ targets: shadow, scale: 1, duration: 520, ease: "Quad.easeIn", onComplete: () => shadow.destroy() });
+    obj.setScale(2.6).setAlpha(0);
+    this.tweens.add({
+      targets: obj,
+      scale: 1,
+      alpha: 1,
+      duration: 520,
+      ease: "Quad.easeIn",
+      onComplete: () => {
+        sfx.meleeHit(x, y, "axe"); // a heavy thud
+        const ring = this.add.circle(x, y, 10, 0xc8b89a, 0).setStrokeStyle(3, 0xc8b89a, 0.7).setDepth(4);
+        this.tweens.add({ targets: ring, scale: 3, alpha: 0, duration: 380, onComplete: () => ring.destroy() });
+        for (let i = 0, n = particleCount(6, 2); i < n; i++) {
+          const a = Math.random() * Math.PI * 2;
+          const puff = this.add.circle(x, y, 4 + Math.random() * 3, 0xb5a587, 0.6).setDepth(4);
+          this.tweens.add({
+            targets: puff,
+            x: x + Math.cos(a) * 26,
+            y: y + Math.sin(a) * 26,
+            alpha: 0,
+            scale: 1.8,
+            duration: 450,
+            onComplete: () => puff.destroy(),
+          });
+        }
+      },
+    });
   }
 
   /**
@@ -1854,6 +1906,8 @@ function formatTime(totalSeconds: number): string {
 const REVEAL_MS = 1200;
 /** Vehicles are baked at this many pixels per world pixel. */
 const VEHICLE_RES = 2;
+/** The size the vehicle art is drawn at (length, width), before scaling to its real size. */
+const VEHICLE_DESIGN_SIZE: Record<VehicleKind, [number, number]> = { bike: [46, 18], car: [66, 36] };
 
 /** Base towers are baked at this many pixels per world pixel. */
 const CORE_RES = 2;
@@ -1883,8 +1937,12 @@ function glowTexture(scene: Phaser.Scene, color: number): string {
  */
 function vehicleTexture(scene: Phaser.Scene, kind: VehicleKind): string {
   const key = `vehicle-${kind}`;
-  const { length: L, width: W } = VEHICLES[kind];
-  bakeShape(scene, key, L + 10, W + 12, VEHICLE_RES, (g) => {
+  // The art below is drawn at a fixed design size and scaled up to the vehicle's real size
+  // (VEHICLES[kind].length), so it stays sharp and in proportion if the sizes are changed.
+  const [L, W] = VEHICLE_DESIGN_SIZE[kind];
+  const k = VEHICLES[kind].length / L;
+  bakeShape(scene, key, (L + 10) * k, (W + 12) * k, VEHICLE_RES, (g) => {
+    g.setScale(VEHICLE_RES * k);
     if (kind === "bike") {
       g.fillStyle(0x000000, 0.3);
       g.fillEllipse(3, 4, L, W * 0.8);

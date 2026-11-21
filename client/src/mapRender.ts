@@ -359,47 +359,6 @@ function drawRect(g: G, o: RectObstacle, rng: () => number) {
       break;
     }
 
-    case "car": {
-      const body = o.color ?? 0xaa3333;
-      g.fillStyle(0x111111, 1); // tires peeking out
-      if (horizontal) {
-        g.fillRect(x + 10, y - 3, 16, 4);
-        g.fillRect(x + w - 26, y - 3, 16, 4);
-        g.fillRect(x + 10, y + h - 1, 16, 4);
-        g.fillRect(x + w - 26, y + h - 1, 16, 4);
-      } else {
-        g.fillRect(x - 3, y + 10, 4, 16);
-        g.fillRect(x - 3, y + h - 26, 4, 16);
-        g.fillRect(x + w - 1, y + 10, 4, 16);
-        g.fillRect(x + w - 1, y + h - 26, 4, 16);
-      }
-      g.fillStyle(body, 1);
-      g.fillRoundedRect(x, y, w, h, 8);
-      g.fillStyle(shade(body, 1.2), 1);
-      g.fillRoundedRect(x + (horizontal ? 24 : 5), y + (horizontal ? 5 : 24), horizontal ? w - 44 : w - 10, horizontal ? h - 10 : h - 44, 5);
-      // Windshields
-      g.fillStyle(0x23303c, 1);
-      if (horizontal) {
-        g.fillRect(x + w - 30, y + 6, 8, h - 12);
-        g.fillRect(x + 16, y + 7, 7, h - 14);
-      } else {
-        g.fillRect(x + 6, y + h - 30, w - 12, 8);
-        g.fillRect(x + 7, y + 16, w - 14, 7);
-      }
-      // Headlights
-      g.fillStyle(0xfff4c2, 1);
-      if (horizontal) {
-        g.fillRect(x + w - 4, y + 5, 3, 7);
-        g.fillRect(x + w - 4, y + h - 12, 3, 7);
-      } else {
-        g.fillRect(x + 5, y + h - 4, 7, 3);
-        g.fillRect(x + w - 12, y + h - 4, 7, 3);
-      }
-      g.lineStyle(1.5, shade(body, 0.5), 1);
-      g.strokeRoundedRect(x, y, w, h, 8);
-      break;
-    }
-
     case "barrier": {
       g.fillStyle(0x9fa3a7, 1);
       g.fillRect(x, y, w, h);
