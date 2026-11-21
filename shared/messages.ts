@@ -40,7 +40,7 @@ export interface KillEvent {
   weapon: WeaponId | "zone" | "car";
 }
 
-/** "supplyDrop": an ammo box is dropping in (team mode resupply). The item itself is synced state. */
+/** "supplyDrop": an ammo box or medkit is dropping in (team mode resupply). The item itself is synced state. */
 export interface SupplyDropEvent {
   /** Key of the new item in ArenaState.items. */
   id: string;

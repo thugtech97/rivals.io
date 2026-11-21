@@ -127,25 +127,29 @@ export const MEDKIT_HEAL = 40;
 export const STARTING_WEAPON: GunId = "pistol";
 
 /**
- * Loot placed on the map at the start of each match. Nothing else appears later.
+ * Loot placed on the map at the start of each match (team matches also resupply ammo and
+ * medkits, see shared/teams.ts).
  * `perPlayer` adds that many more for every player in the match (more players, more ammo).
+ * `teamPerPlayer` adds that many more per player in team matches only (rounded), since
+ * nobody is knocked out there and the map would otherwise run dry. 10 players: +5 rifles.
  */
 export const LOOT_TABLE: {
   item: "weapon" | "vest" | "ammo" | "medkit" | "boots";
   weapon?: WeaponId;
   count: number;
   perPlayer?: number;
+  teamPerPlayer?: number;
 }[] = [
-  { item: "medkit", count: 8 },
-  { item: "weapon", weapon: "rifle", count: 5 },
-  { item: "weapon", weapon: "mg", count: 2 },
-  { item: "weapon", weapon: "sniper", count: 2 },
-  { item: "weapon", weapon: "pistol", count: 3 },
-  { item: "weapon", weapon: "knife", count: 3 },
-  { item: "weapon", weapon: "sword", count: 2 },
-  { item: "weapon", weapon: "axe", count: 2 },
-  { item: "weapon", weapon: "bazooka", count: 2 },
-  { item: "weapon", weapon: "grenade", count: 6 },
+  { item: "medkit", count: 8, teamPerPlayer: 0.5 },
+  { item: "weapon", weapon: "rifle", count: 5, teamPerPlayer: 0.5 },
+  { item: "weapon", weapon: "mg", count: 2, teamPerPlayer: 0.25 },
+  { item: "weapon", weapon: "sniper", count: 2, teamPerPlayer: 0.25 },
+  { item: "weapon", weapon: "pistol", count: 3, teamPerPlayer: 0.25 },
+  { item: "weapon", weapon: "knife", count: 3, teamPerPlayer: 0.125 },
+  { item: "weapon", weapon: "sword", count: 2, teamPerPlayer: 0.125 },
+  { item: "weapon", weapon: "axe", count: 2, teamPerPlayer: 0.125 },
+  { item: "weapon", weapon: "bazooka", count: 2, teamPerPlayer: 0.25 },
+  { item: "weapon", weapon: "grenade", count: 6, teamPerPlayer: 0.5 },
   { item: "vest", count: 5 },
   { item: "boots", count: 4 },
   { item: "ammo", count: 10, perPlayer: 3 }, // 2 players: 16 boxes, 4: 22, 8: 34, 16: 58

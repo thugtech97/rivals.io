@@ -1,7 +1,7 @@
 import { Schema, MapSchema, ArraySchema, type } from "@colyseus/schema";
 import { PLAYER_MAX_HP } from "../../../shared/constants";
 import { SLOT_COUNT } from "../../../shared/weapons";
-import { CORE_MAX_HP } from "../../../shared/teams";
+import { CORE_MIN_HP } from "../../../shared/teams";
 
 /** One inventory slot. weapon "" = empty (you fight with your fists). */
 export class WeaponSlot extends Schema {
@@ -77,7 +77,9 @@ export class Core extends Schema {
   @type("string") team = "";
   @type("number") x = 0;
   @type("number") y = 0;
-  @type("number") hp = CORE_MAX_HP;
+  @type("number") hp = CORE_MIN_HP;
+  /** Full health: scales with the match's player count (see coreMaxHp in shared/teams.ts). */
+  @type("number") maxHp = CORE_MIN_HP;
 
   // Server-only
   nextShotAt = 0;

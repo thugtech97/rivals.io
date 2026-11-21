@@ -33,7 +33,16 @@ export const BASES: Record<Team, { x: number; y: number }> = {
 export const BASE_CLEAR_RADIUS = 210;
 /** The core: a solid round tower in the middle of the base. */
 export const CORE_RADIUS = 34;
-export const CORE_MAX_HP = 3000;
+/**
+ * Core health scales with the match size, so a base falls in about the same time whether
+ * it's 1v1 or 8v8: CORE_HP_PER_PLAYER for every player in the match, at least CORE_MIN_HP.
+ * 2 players: 600, 6: 900, 10: 1500, 16: 2400.
+ */
+export const CORE_HP_PER_PLAYER = 150;
+export const CORE_MIN_HP = 600;
+export function coreMaxHp(players: number): number {
+  return Math.max(CORE_MIN_HP, Math.round(CORE_HP_PER_PLAYER * players));
+}
 /** Inside this radius of your own core you heal (the "fountain"). */
 export const FOUNTAIN_RADIUS = 190;
 export const FOUNTAIN_HEAL_PER_SEC = 30;
@@ -47,12 +56,13 @@ export const TURRET_RANGE = 650;
 export const TEAM_RESPAWN_MS = 5000;
 
 /**
- * Ammo resupply (team matches only, since players keep respawning): every AMMO_RESUPPLY_MS,
- * if fewer ammo boxes are lying around than this fraction of what the match started with,
- * one more drops in somewhere random (never inside a base).
+ * Resupply (team matches only, since players keep respawning): every RESUPPLY_MS, for each
+ * kind in RESUPPLY_ITEMS, if fewer are lying around than this fraction of what the match
+ * started with, one more drops in somewhere random (never inside a base).
  */
-export const AMMO_RESUPPLY_MS = 10_000;
-export const AMMO_RESUPPLY_MIN_FRACTION = 0.5;
+export const RESUPPLY_MS = 10_000;
+export const RESUPPLY_MIN_FRACTION = 0.5;
+export const RESUPPLY_ITEMS = ["ammo", "medkit"] as const;
 
 /** Extra room seats for people who only watch (they don't count as players). */
 export const MAX_SPECTATORS = 8;

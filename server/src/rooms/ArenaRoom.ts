@@ -48,17 +48,18 @@ import {
   type VehicleKind,
 } from "../../../shared/vehicles";
 import {
-  AMMO_RESUPPLY_MIN_FRACTION,
-  AMMO_RESUPPLY_MS,
   BASE_CLEAR_RADIUS,
   BASES,
-  CORE_MAX_HP,
+  coreMaxHp,
   CORE_RADIUS,
   FOUNTAIN_HEAL_PER_SEC,
   FOUNTAIN_RADIUS,
   isTeam,
   MAX_SPECTATORS,
   otherTeam,
+  RESUPPLY_ITEMS,
+  RESUPPLY_MIN_FRACTION,
+  RESUPPLY_MS,
   TEAM_COLOR,
   TEAM_NAME,
   TEAM_RESPAWN_MS,
@@ -167,8 +168,10 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
   private nextBulletId = 1;
   private nextItemId = 1;
   private nextVehicleId = 1;
-  /** Team matches: when the server next checks whether the map needs more ammo. */
+  /** Team matches: when the server next checks whether the map needs more ammo / medkits. */
   private nextResupplyAt = 0;
+  /** How many of each item kind the current loot started with (the resupply target). */
+  private lootStartCount = new Map<string, number>();
   /** Ramming cooldown: "<car id>:<victim id>" → earliest time it can hurt them again. */
   private ramReadyAt = new Map<string, number>();
   private matchStart = 0;
@@ -611,7 +614,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
     if (teams && this.state.matchPhase === "live") {
       this.fireTurrets(now); // warmup is free practice
-      this.resupplyAmmo(now);
+      this.resupply(now);
     }
     this.moveBullets(dtMs, now);
     this.moveGrenades(dtMs, now);
@@ -622,19 +625,21 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
   // ---------- Team bases ----------
 
-  /** Both cores back to full health (team mode), or no cores at all (solo). */
+  /** Both cores back to full health (team mode), or no cores at all (solo). Health scales with the player count. */
   private resetCores() {
     const cores = this.state.cores;
     if (this.mode !== "teams") {
       cores.clear();
       return;
     }
+    const maxHp = coreMaxHp(this.playerCount());
     for (const team of TEAMS) {
       const core = cores.get(team) ?? new Core();
       core.team = team;
       core.x = BASES[team].x;
       core.y = BASES[team].y;
-      core.hp = CORE_MAX_HP;
+      core.maxHp = maxHp;
+      core.hp = maxHp;
       core.nextShotAt = 0;
       if (!cores.has(team)) cores.set(team, core);
     }
@@ -1127,12 +1132,18 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
   // ---------- Items on the ground ----------
 
-  /** Scatter the match's loot. This is the only time items appear by themselves. */
-  /** `players`: how many are in the match (some loot, like ammo, scales with it). */
+  /**
+   * Scatter the match's loot. `players`: how many are in the match (ammo scales with it, and
+   * in team matches weapons and medkits too). Solo: nothing else appears by itself later.
+   */
   private spawnLoot(players: number) {
     this.state.items.clear();
+    this.lootStartCount.clear();
+    const teams = this.mode === "teams";
     for (const entry of LOOT_TABLE) {
-      const count = entry.count + (entry.perPlayer ?? 0) * players;
+      const count =
+        entry.count + (entry.perPlayer ?? 0) * players + (teams ? Math.round((entry.teamPerPlayer ?? 0) * players) : 0);
+      this.lootStartCount.set(entry.item, (this.lootStartCount.get(entry.item) ?? 0) + count);
       for (let i = 0; i < count; i++) {
         const spot = this.map.findFreeSpot(PICKUP_RADIUS + PLAYER_RADIUS * 2, 60);
         const item = new GroundItem();
@@ -1155,27 +1166,30 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
   }
 
   /**
-   * Team matches never end by running out of players, so ammo would run out instead: when
-   * fewer boxes are lying around than half of what the match started with, drop a new one
-   * every AMMO_RESUPPLY_MS somewhere random (never inside a base, so nobody camps a stash).
+   * Team matches never end by running out of players, so ammo and medkits would run out
+   * instead: every RESUPPLY_MS, for each of those kinds with fewer lying around than half of
+   * what the match started with, drop a new one somewhere random (never inside a base, so
+   * nobody camps a stash).
    */
-  private resupplyAmmo(now: number) {
+  private resupply(now: number) {
     if (now < this.nextResupplyAt) return;
-    this.nextResupplyAt = now + AMMO_RESUPPLY_MS;
-    const entry = LOOT_TABLE.find((e) => e.item === "ammo");
-    if (!entry) return;
-    const start = entry.count + (entry.perPlayer ?? 0) * this.playerCount();
-    let boxes = 0;
-    this.state.items.forEach((it) => {
-      if (it.kind === "ammo") boxes++;
-    });
-    if (boxes >= Math.ceil(start * AMMO_RESUPPLY_MIN_FRACTION)) return;
+    this.nextResupplyAt = now + RESUPPLY_MS;
+    const onMap = new Map<string, number>();
+    this.state.items.forEach((it) => onMap.set(it.kind, (onMap.get(it.kind) ?? 0) + 1));
+    for (const kind of RESUPPLY_ITEMS) {
+      const start = this.lootStartCount.get(kind) ?? 0;
+      if ((onMap.get(kind) ?? 0) < Math.ceil(start * RESUPPLY_MIN_FRACTION)) this.dropSupply(kind);
+    }
+  }
+
+  /** One supply item drops in somewhere random outside the bases (with a drop-in effect on clients). */
+  private dropSupply(kind: (typeof RESUPPLY_ITEMS)[number]) {
     let spot = this.map.findFreeSpot(PICKUP_RADIUS + PLAYER_RADIUS * 2, 60);
     for (let i = 0; i < 20 && TEAMS.some((t) => Math.hypot(spot.x - BASES[t].x, spot.y - BASES[t].y) < BASE_CLEAR_RADIUS + 60); i++) {
       spot = this.map.findFreeSpot(PICKUP_RADIUS + PLAYER_RADIUS * 2, 60);
     }
     const item = new GroundItem();
-    item.kind = "ammo";
+    item.kind = kind;
     item.x = spot.x;
     item.y = spot.y;
     const id = String(this.nextItemId++);
@@ -1451,11 +1465,11 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     this.resetZone();
     this.resetCores();
     this.balanceTeams();
-    this.nextResupplyAt = now + AMMO_RESUPPLY_MS;
+    this.nextResupplyAt = now + RESUPPLY_MS;
     this.bullets = [];
     this.state.grenades.clear();
     this.newMap(); // a brand-new random map for every match
-    this.spawnLoot(this.playerCount()); // and fresh loot (placed once; nothing respawns during the match)
+    this.spawnLoot(this.playerCount()); // and fresh loot (solo: placed once; teams: ammo and medkits resupply)
     this.spawnVehicles();
     // Everyone starts equal
     s.players.forEach((p) => {

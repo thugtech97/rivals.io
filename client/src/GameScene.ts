@@ -16,7 +16,6 @@ import type {
 import { isVehicleKind, VEHICLE_REACH, VEHICLE_TURN_PER_SEC, VEHICLES, type VehicleKind } from "../../shared/vehicles";
 import type { CircleObstacle } from "../../shared/map";
 import {
-  CORE_MAX_HP,
   CORE_RADIUS,
   isTeam,
   otherTeam,
@@ -139,6 +138,13 @@ interface CoreData {
   x: number;
   y: number;
   hp: number;
+  maxHp: number;
+}
+
+/** A core's health as 0..1 of full. */
+function coreFraction(c: CoreData | undefined): number {
+  if (!c) return 1;
+  return c.maxHp > 0 ? c.hp / c.maxHp : 0;
 }
 
 /**
@@ -255,7 +261,7 @@ export class GameScene extends Phaser.Scene {
   /** Team mode: the two bases. */
   private cores = new Map<string, CoreView>();
   private vehicles = new Map<string, VehicleView>();
-  /** Ammo boxes announced as dropping in (team resupply), animated when they appear. */
+  /** Ammo boxes / medkits announced as dropping in (team resupply), animated when they appear. */
   private incomingDrops = new Set<string>();
   /** Canopies currently shaking (or settling back down). */
   private shaking = new Map<CircleObstacle, ShakingTree>();
@@ -877,7 +883,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private drawCoreHp(c: CoreView) {
-    const pct = Math.max(0, Math.min(1, c.data.hp / CORE_MAX_HP));
+    const pct = Math.max(0, Math.min(1, coreFraction(c.data)));
     c.hpFill.setScale(pct, 1).setVisible(pct > 0);
     c.lastHp = c.data.hp;
   }
@@ -1068,8 +1074,8 @@ export class GameScene extends Phaser.Scene {
         ? {
             blueKills: Number(this.room.state.blueKills ?? 0),
             redKills: Number(this.room.state.redKills ?? 0),
-            blueCore: this.cores.get("blue")?.data.hp ?? CORE_MAX_HP,
-            redCore: this.cores.get("red")?.data.hp ?? CORE_MAX_HP,
+            blueCore: coreFraction(this.cores.get("blue")?.data),
+            redCore: coreFraction(this.cores.get("red")?.data),
             myTeam: this.myTeam,
           }
         : null,
@@ -1114,10 +1120,14 @@ export class GameScene extends Phaser.Scene {
         slots.push({ name: sl.weapon ? heldStats(sl.weapon).name : "", ammo, active: i === d.active });
       }
       this.hud.setSlots(d.alive ? slots : null);
-      const prompt = d.alive ? this.pickupPrompt(d) || this.ridePrompt(d) : "";
+      const pickup = d.alive ? this.pickupPrompt(d) : "";
+      const ride = d.alive ? this.ridePrompt(d) : "";
+      const prompt = pickup || ride;
       this.hud.setPrompt(isTouchMode() ? prompt.replace(/^E:/, "✋").replace(/^F:/, "🚗") : prompt);
-      this.touch?.setPickupHint(prompt.startsWith("E:"));
-      this.touch?.setRideHint(prompt.startsWith("F:"));
+      // Each button glows on its own (the text prompt only has room for one), so the 🚗
+      // button still lights up when a car is parked next to some loot.
+      this.touch?.setPickupHint(pickup.startsWith("E:"));
+      this.touch?.setRideHint(ride.startsWith("F:"));
 
       const by = this.killedBy ? `Eliminated by ${this.killedBy}` : "Eliminated";
       const switchHint = isTouchMode() ? "tap the screen to switch" : "click / Space / ← → to switch";
@@ -1246,7 +1256,7 @@ export class GameScene extends Phaser.Scene {
       x: c.data.x,
       y: c.data.y,
       color: isTeam(c.data.team) ? TEAM_CSS[c.data.team] : "#ffffff",
-      hp: c.data.hp / CORE_MAX_HP,
+      hp: coreFraction(c.data),
     }));
     return { others, bases };
   }

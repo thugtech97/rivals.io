@@ -1,7 +1,6 @@
 import { PLAYER_MAX_HP } from "../../shared/constants";
 import { VEST_ARMOR } from "../../shared/weapons";
 import { Minimap } from "./minimap";
-import { CORE_MAX_HP } from "../../shared/teams";
 
 /** One weapon slot as shown in the HUD. */
 export interface SlotInfo {
@@ -32,6 +31,7 @@ export interface ScoreRow {
 export interface TeamScore {
   blueKills: number;
   redKills: number;
+  /** Each base's health, 0..1 of full. */
   blueCore: number;
   redCore: number;
   /** Your team ("" while spectating): its side gets highlighted. */
@@ -264,8 +264,8 @@ export class Hud {
     if (!score) return;
     this.el.blueKills.textContent = String(score.blueKills);
     this.el.redKills.textContent = String(score.redKills);
-    this.el.blueCore.style.width = `${Math.max(0, (score.blueCore / CORE_MAX_HP) * 100)}%`;
-    this.el.redCore.style.width = `${Math.max(0, (score.redCore / CORE_MAX_HP) * 100)}%`;
+    this.el.blueCore.style.width = `${Math.max(0, Math.min(1, score.blueCore) * 100)}%`;
+    this.el.redCore.style.width = `${Math.max(0, Math.min(1, score.redCore) * 100)}%`;
     this.el.teamScore.dataset.mine = score.myTeam;
   }
 
