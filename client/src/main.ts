@@ -54,7 +54,7 @@ function hideLoader() {
   ui.loader.hidden = true;
 }
 
-// ---------- Fullscreen (phones) ----------
+// ---------- Fullscreen (toolbar button; phones also lock to landscape) ----------
 
 /** Fullscreen, and (on Android) lock to landscape. iPhone browsers don't allow either. */
 async function goFullscreenLandscape() {
@@ -72,8 +72,19 @@ ui.fullscreen.onclick = async () => {
   else await goFullscreenLandscape();
 };
 
+/** When fullscreen last ended: the Esc that exits fullscreen must not also leave the room. */
+let fullscreenEndedAt = 0;
+function showFullscreen() {
+  const on = !!document.fullscreenElement;
+  if (!on) fullscreenEndedAt = performance.now();
+  ui.fullscreen.title = on ? "Exit fullscreen" : "Fullscreen";
+  ui.fullscreen.classList.toggle("on", on); // highlighted while on
+}
+document.addEventListener("fullscreenchange", showFullscreen);
+
 // "Turn your phone sideways" screen (shown by CSS in portrait during a game)
 const canFullscreen = typeof document.documentElement.requestFullscreen === "function";
+ui.fullscreen.hidden = !canFullscreen; // iPhone Safari has no fullscreen for websites
 ui.rotateGo.hidden = !canFullscreen; // iPhone: no fullscreen / rotation lock for websites…
 ui.rotateIos.hidden = canFullscreen; // …so explain how to rotate instead
 ui.rotateGo.onclick = () => goFullscreenLandscape();
@@ -504,7 +515,9 @@ ui.helpBtn.onclick = () => {
 
 window.addEventListener("keydown", (e) => {
   if (!gameRoom) return;
-  if (e.key === "Escape") leaveGame();
+  // In fullscreen the browser uses Esc to exit it; only leave on an Esc of its own.
+  const exitingFullscreen = !!document.fullscreenElement || performance.now() - fullscreenEndedAt < 500;
+  if (e.key === "Escape" && !exitingFullscreen) leaveGame();
   if (e.key === "h" || e.key === "H") setHelp(!helpOpen);
 });
 
