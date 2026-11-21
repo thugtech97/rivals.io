@@ -76,6 +76,8 @@ const BULLET_STEP_PX = 8;
 const ITEM_REACH = PLAYER_RADIUS + PICKUP_RADIUS + 4;
 /** Something you just dropped isn't auto-picked up again for this long (E still works). */
 const DROP_BLOCK_MS = 2500;
+/** A base turret with nobody in sight looks for a target this often (not every tick). */
+const TURRET_SCAN_MS = 200;
 /** Switching weapons takes a moment before you can attack. */
 const SWITCH_DELAY_MS = 180;
 
@@ -593,7 +595,11 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
           target = p;
         }
       });
-      if (!target) return;
+      if (!target) {
+        // Nobody in sight: look again in a moment (line-of-sight checks are the costly part).
+        core.nextShotAt = now + TURRET_SCAN_MS;
+        return;
+      }
       core.nextShotAt = now + gun.fireMs;
       const aim = Math.atan2(target.y - core.y, target.x - core.x);
       const angle = aim + (Math.random() * 2 - 1) * gun.spread;

@@ -7,14 +7,12 @@ import type { BulletEndEvent, CoreDestroyedEvent, ExplosionEvent, KillEvent, Sho
 import {
   CORE_MAX_HP,
   CORE_RADIUS,
-  FOUNTAIN_RADIUS,
   isTeam,
   otherTeam,
   TEAM_COLOR,
   TEAM_CSS,
   TEAM_NAME,
   TEAM_RESPAWN_MS,
-  TURRET_RANGE,
   type GameMode,
 } from "../../shared/teams";
 import {
@@ -107,14 +105,17 @@ interface CoreData {
   hp: number;
 }
 
-/** A team base: the ground pad (fountain + turret range), the tower, its health bar and name. */
+/**
+ * A team base: the tower, its health bar and name. (The ground pad is baked into the map.)
+ * Everything here is a baked image or a plain rectangle: no live Graphics redrawn every frame.
+ */
 interface CoreView {
   data: CoreData;
-  pad: Phaser.GameObjects.Graphics;
   tower: Phaser.GameObjects.Container;
-  flash: Phaser.GameObjects.Arc;
-  glow: Phaser.GameObjects.Arc;
-  hpBar: Phaser.GameObjects.Graphics;
+  flash: Phaser.GameObjects.Image;
+  glow: Phaser.GameObjects.Image;
+  hpBack: Phaser.GameObjects.Rectangle;
+  hpFill: Phaser.GameObjects.Rectangle;
   label: Phaser.GameObjects.Text;
   lastHp: number;
   /** Hit sparks / sounds are throttled (a machine gun hits it 13×/s). */
@@ -721,51 +722,55 @@ export class GameScene extends Phaser.Scene {
 
   private addCore(team: string, data: CoreData) {
     const color = isTeam(team) ? TEAM_COLOR[team] : 0xffffff;
-    // On the ground: the turret's reach (faint dashes), the fountain, and a paved pad.
-    const pad = this.add.graphics().setDepth(1);
-    pad.lineStyle(2, color, 0.22);
-    const dashes = 48;
-    for (let i = 0; i < dashes; i++) {
-      const a0 = (i / dashes) * Math.PI * 2;
-      pad.beginPath();
-      pad.arc(data.x, data.y, TURRET_RANGE, a0, a0 + (Math.PI / dashes) * 1.1);
-      pad.strokePath();
-    }
-    pad.fillStyle(color, 0.1);
-    pad.fillCircle(data.x, data.y, FOUNTAIN_RADIUS);
-    pad.lineStyle(3, color, 0.55);
-    pad.strokeCircle(data.x, data.y, FOUNTAIN_RADIUS);
-    pad.fillStyle(0x5b606b, 1);
-    pad.fillCircle(data.x, data.y, CORE_RADIUS + 22);
-    pad.lineStyle(3, 0x3a3e47, 1);
-    pad.strokeCircle(data.x, data.y, CORE_RADIUS + 22);
-    for (let i = 0; i < 8; i++) {
-      const a = (i / 8) * Math.PI * 2;
-      pad.lineStyle(2, 0x494d57, 1);
-      pad.lineBetween(
-        data.x + Math.cos(a) * (CORE_RADIUS + 4),
-        data.y + Math.sin(a) * (CORE_RADIUS + 4),
-        data.x + Math.cos(a) * (CORE_RADIUS + 22),
-        data.y + Math.sin(a) * (CORE_RADIUS + 22),
-      );
-    }
+    const hex = color.toString(16);
+    const R = CORE_RADIUS;
+    // The tower: a team-colored crystal in an armored ring (baked once per team color),
+    // with a pulsing glow and a white hit flash (baked circles).
+    bakeShape(this, `core-tower-${hex}`, (R + 8) * 2, (R + 8) * 2, CORE_RES, (g) => {
+      g.fillStyle(0x000000, 0.35);
+      g.fillCircle(5, 6, R);
+      g.fillStyle(0x2a2e36, 1);
+      g.fillCircle(0, 0, R);
+      g.lineStyle(3, 0x15171c, 1);
+      g.strokeCircle(0, 0, R);
+      const pts: Phaser.Math.Vector2[] = [];
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2 + Math.PI / 6;
+        pts.push(new Phaser.Math.Vector2(Math.cos(a) * (R - 8), Math.sin(a) * (R - 8)));
+      }
+      g.fillStyle(color, 1);
+      g.fillPoints(pts, true);
+      g.lineStyle(2, 0xffffff, 0.6);
+      g.strokePoints(pts, true);
+      g.fillStyle(0xffffff, 0.45);
+      g.fillCircle(-6, -7, 7);
+    });
+    bakeShape(this, `core-glow-${hex}`, (R + 12) * 2, (R + 12) * 2, CORE_RES, (g) => {
+      g.fillStyle(color, 1);
+      g.fillCircle(0, 0, R + 10);
+    });
+    bakeShape(this, "core-flash", R * 2 + 2, R * 2 + 2, CORE_RES, (g) => {
+      g.fillStyle(0xffffff, 1);
+      g.fillCircle(0, 0, R);
+    });
+    const glow = this.add.image(0, 0, `core-glow-${hex}`).setScale(1 / CORE_RES).setAlpha(0.25);
+    const body = this.add.image(0, 0, `core-tower-${hex}`).setScale(1 / CORE_RES);
+    const flash = this.add.image(0, 0, "core-flash").setScale(1 / CORE_RES).setAlpha(0);
+    const tower = this.add.container(data.x, data.y, [glow, body, flash]).setDepth(12);
+    this.tweens.add({
+      targets: glow,
+      scale: 1.25 / CORE_RES,
+      alpha: 0.1,
+      duration: 1100,
+      yoyo: true,
+      repeat: -1,
+      ease: "Sine.easeInOut",
+    });
 
-    // The tower: a team-colored crystal in an armored ring, with a pulsing glow.
-    const glow = this.add.circle(0, 0, CORE_RADIUS + 10, color, 0.25);
-    const shadow = this.add.circle(5, 6, CORE_RADIUS, 0x000000, 0.35);
-    const ring = this.add.circle(0, 0, CORE_RADIUS, 0x2a2e36, 1).setStrokeStyle(3, 0x15171c, 1);
-    const pts: number[] = [];
-    for (let i = 0; i < 6; i++) {
-      const a = (i / 6) * Math.PI * 2 + Math.PI / 6;
-      pts.push(Math.cos(a) * (CORE_RADIUS - 8), Math.sin(a) * (CORE_RADIUS - 8));
-    }
-    const crystal = this.add.polygon(0, 0, pts, color, 1).setStrokeStyle(2, 0xffffff, 0.6);
-    const shine = this.add.circle(-6, -7, 7, 0xffffff, 0.45);
-    const flash = this.add.circle(0, 0, CORE_RADIUS, 0xffffff, 1).setAlpha(0);
-    const tower = this.add.container(data.x, data.y, [glow, shadow, ring, crystal, shine, flash]).setDepth(12);
-    this.tweens.add({ targets: glow, scale: 1.25, alpha: 0.1, duration: 1100, yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
-
-    const hpBar = this.add.graphics().setDepth(41);
+    // Health bar: two plain rectangles (the fill is scaled), above the tree canopies.
+    const barY = data.y - R - 24;
+    const hpBack = this.add.rectangle(data.x, barY, CORE_BAR_W + 4, 11, 0x0b0d12, 0.85).setDepth(41);
+    const hpFill = this.add.rectangle(data.x - CORE_BAR_W / 2, barY, CORE_BAR_W, 7, color, 1).setOrigin(0, 0.5).setDepth(41);
     const name = isTeam(team) ? `${TEAM_NAME[team].toUpperCase()} BASE` : "BASE";
     const label = this.add
       .text(data.x, data.y - CORE_RADIUS - 34, name, {
@@ -779,7 +784,7 @@ export class GameScene extends Phaser.Scene {
       .setOrigin(0.5, 1)
       .setDepth(41);
 
-    const view: CoreView = { data, pad, tower, flash, glow, hpBar, label, lastHp: -1, nextHitFxAt: 0, lastHitAt: -Infinity };
+    const view: CoreView = { data, tower, flash, glow, hpBack, hpFill, label, lastHp: -1, nextHitFxAt: 0, lastHitAt: -Infinity };
     this.cores.set(team, view);
     this.drawCoreHp(view);
   }
@@ -787,24 +792,16 @@ export class GameScene extends Phaser.Scene {
   private removeCore(team: string) {
     const c = this.cores.get(team);
     if (!c) return;
-    c.pad.destroy();
     c.tower.destroy();
-    c.hpBar.destroy();
+    c.hpBack.destroy();
+    c.hpFill.destroy();
     c.label.destroy();
     this.cores.delete(team);
   }
 
   private drawCoreHp(c: CoreView) {
-    const g = c.hpBar;
-    const w = 90;
-    const x = c.data.x - w / 2;
-    const y = c.data.y - CORE_RADIUS - 28;
-    const pct = Math.max(0, c.data.hp / CORE_MAX_HP);
-    g.clear();
-    g.fillStyle(0x0b0d12, 0.85);
-    g.fillRoundedRect(x - 2, y - 2, w + 4, 11, 3);
-    g.fillStyle(isTeam(c.data.team) ? TEAM_COLOR[c.data.team] : 0xffffff, 1);
-    if (pct > 0) g.fillRoundedRect(x, y, Math.max(2, w * pct), 7, 2);
+    const pct = Math.max(0, Math.min(1, c.data.hp / CORE_MAX_HP));
+    c.hpFill.setScale(pct, 1).setVisible(pct > 0);
     c.lastHp = c.data.hp;
   }
 
@@ -1627,6 +1624,11 @@ function formatTime(totalSeconds: number): string {
   const s = Math.max(0, Math.floor(totalSeconds));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
+
+/** Base towers are baked at this many pixels per world pixel. */
+const CORE_RES = 2;
+/** Width of a base's health bar (world pixels). */
+const CORE_BAR_W = 90;
 
 /** Item icons are baked at this many pixels per world pixel. */
 const ITEM_RES = 2;

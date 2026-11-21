@@ -10,6 +10,7 @@ import {
   type GameMap,
   type RectObstacle,
 } from "../../shared/map";
+import { BASES, CORE_RADIUS, FOUNTAIN_RADIUS, TEAM_COLOR, TEAMS, TURRET_RANGE } from "../../shared/teams";
 import { shade } from "./soldier";
 import { bakeAtlas } from "./atlas";
 
@@ -41,6 +42,7 @@ export function renderMap(scene: Phaser.Scene, map: GameMap, resolution: number)
   drawGrass(g, rng);
   drawGrounds(g, map, rng);
   drawRoads(g);
+  if (map.mode === "teams") drawBasePads(g);
   drawShadows(g, map);
   for (const o of map.obstacles) {
     if (o.kind === "rect") drawRect(g, o, rng);
@@ -138,6 +140,40 @@ function drawGrass(g: G, rng: () => number) {
     g.fillCircle(x, y, r);
     g.fillStyle(0x4f8a38, 1);
     g.fillCircle(x - r * 0.3, y - r * 0.3, r * 0.6);
+  }
+}
+
+/**
+ * Team mode: the ground around each base (turret reach as faint dashes, the fountain, a paved
+ * pad). Static, so it's baked with the rest of the map; the tower itself is drawn by GameScene.
+ */
+function drawBasePads(g: G) {
+  for (const team of TEAMS) {
+    const { x, y } = BASES[team];
+    const color = TEAM_COLOR[team];
+    g.lineStyle(2, color, 0.22);
+    const dashes = 48;
+    for (let i = 0; i < dashes; i++) {
+      const a0 = (i / dashes) * Math.PI * 2;
+      g.beginPath();
+      g.arc(x, y, TURRET_RANGE, a0, a0 + (Math.PI / dashes) * 1.1);
+      g.strokePath();
+    }
+    g.fillStyle(color, 0.1);
+    g.fillCircle(x, y, FOUNTAIN_RADIUS);
+    g.lineStyle(3, color, 0.55);
+    g.strokeCircle(x, y, FOUNTAIN_RADIUS);
+    g.fillStyle(0x5b606b, 1);
+    g.fillCircle(x, y, CORE_RADIUS + 22);
+    g.lineStyle(3, 0x3a3e47, 1);
+    g.strokeCircle(x, y, CORE_RADIUS + 22);
+    g.lineStyle(2, 0x494d57, 1);
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      const c = Math.cos(a);
+      const s = Math.sin(a);
+      g.lineBetween(x + c * (CORE_RADIUS + 4), y + s * (CORE_RADIUS + 4), x + c * (CORE_RADIUS + 22), y + s * (CORE_RADIUS + 22));
+    }
   }
 }
 
