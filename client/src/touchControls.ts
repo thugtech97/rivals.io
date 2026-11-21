@@ -2,12 +2,12 @@
 //
 //   left thumb  → MOVE stick (appears where you touch on the left side)
 //   right thumb → AIM stick: push it far enough and you shoot / swing
-//   buttons     → pick up, reload, switch weapon, drop
+//   buttons     → pick up, reload, switch weapon, drop, get on / off a vehicle
 //
 // "Touch mode" turns on with the first touch, and off again when a real mouse moves,
 // so touchscreen laptops work both ways.
 
-export type TouchAction = "pickup" | "reload" | "next-weapon" | "drop";
+export type TouchAction = "pickup" | "reload" | "next-weapon" | "drop" | "ride";
 
 /** Push the aim stick at least this far (0..1) to fire. */
 const FIRE_THRESHOLD = 0.55;
@@ -128,6 +128,7 @@ export class TouchControls {
   private moveStick = new Stick($("stick-move"));
   private aimStick = new Stick($("stick-aim"));
   private pickupBtn = this.root.querySelector('[data-action="pickup"]') as HTMLElement;
+  private rideBtn = this.root.querySelector('[data-action="ride"]') as HTMLElement;
   onAction?: (a: TouchAction) => void;
   private shown = false;
 
@@ -161,6 +162,11 @@ export class TouchControls {
   /** Glow the pick-up button when there's something to pick up / swap. */
   setPickupHint(on: boolean) {
     this.pickupBtn.classList.toggle("hint", on);
+  }
+
+  /** Glow the ride button when next to a vehicle (or riding one). */
+  setRideHint(on: boolean) {
+    this.rideBtn?.classList.toggle("hint", on);
   }
 
   /** Movement as the four direction keys (8 directions, like WASD). */

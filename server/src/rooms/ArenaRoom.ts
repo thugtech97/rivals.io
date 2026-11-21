@@ -1,5 +1,5 @@
 import { Room, type Client } from "colyseus";
-import { ArenaState, Core, Grenade, GroundItem, Player, WeaponSlot } from "../schema/ArenaState";
+import { ArenaState, Core, Grenade, GroundItem, Player, Vehicle, WeaponSlot } from "../schema/ArenaState";
 import {
   ARENA_SIZE,
   DEFAULT_PLAYERS_PER_ROOM,
@@ -27,7 +27,17 @@ import {
   IDLE_KICK_MS,
 } from "../../../shared/constants";
 import { angleDelta, applyInput, clamp, isMoving, muzzlePosition, NO_INPUT, type InputState } from "../../../shared/movement";
-import type { BulletEndEvent, CoreDestroyedEvent, ExplosionEvent, KillEvent, ShotEvent, SwingEvent } from "../../../shared/messages";
+import type { BulletEndEvent, CoreDestroyedEvent, ExplosionEvent, KillEvent, RamEvent, ShotEvent, SwingEvent } from "../../../shared/messages";
+import {
+  isVehicleKind,
+  RAM_COOLDOWN_MS,
+  RAM_PUSH_PX,
+  ROAD_VEHICLES,
+  VEHICLE_REACH,
+  VEHICLE_TURN_PER_SEC,
+  VEHICLES,
+  type VehicleKind,
+} from "../../../shared/vehicles";
 import {
   BASE_CLEAR_RADIUS,
   BASES,
@@ -46,7 +56,7 @@ import {
   type GameMode,
   type Team,
 } from "../../../shared/teams";
-import { GameMap, newMapSeed } from "../../../shared/map";
+import { GameMap, newMapSeed, ROADS } from "../../../shared/map";
 import {
   BOOTS_DURATION_MS,
   BOOTS_SPEED_MUL,
@@ -145,6 +155,9 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
   private bullets: Bullet[] = [];
   private nextBulletId = 1;
   private nextItemId = 1;
+  private nextVehicleId = 1;
+  /** Ramming cooldown: "<car id>:<victim id>" → earliest time it can hurt them again. */
+  private ramReadyAt = new Map<string, number>();
   private matchStart = 0;
   /** When the countdown / winner banner ends. */
   private phaseEndsAt = 0;
@@ -160,6 +173,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     this.resetZone();
     this.resetCores();
     this.spawnLoot(MATCH_MIN_PLAYERS); // warmup loot; each match spawns its own for its player count
+    this.spawnVehicles();
 
     const requested = Math.round(Number(options.maxPlayers) || DEFAULT_PLAYERS_PER_ROOM);
     const maxPlayers = clamp(requested, MIN_PLAYERS_PER_ROOM, MAX_PLAYERS_PER_ROOM);
@@ -208,6 +222,15 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       this.markActive(client.sessionId);
       const p = this.state.players.get(client.sessionId);
       if (p?.alive) this.dropSlot(p, client.sessionId, p.active);
+    });
+
+    // F: get on the closest free vehicle in reach, or off the one you're riding.
+    this.onMessage("ride", (client) => {
+      this.markActive(client.sessionId);
+      const p = this.state.players.get(client.sessionId);
+      if (!p?.alive || p.spectator) return;
+      if (p.vehicle) this.dismount(p, client.sessionId);
+      else this.mount(p, client.sessionId);
     });
 
     // E: pick up / swap the item you're standing on
@@ -314,6 +337,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
   onLeave(client: Client) {
     const player = this.state.players.get(client.sessionId);
+    if (player) this.dismount(player, client.sessionId, false);
     // Leaving mid-match: your gear stays on the ground for others.
     if (player?.alive && this.state.matchPhase === "live") this.dropEverything(player);
     this.state.players.delete(client.sessionId);
@@ -402,6 +426,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
   /** Stop playing and just watch. Mid-match, your gear drops where you stood. */
   private makeSpectator(p: Player, sessionId: string) {
+    this.dismount(p, sessionId, false);
     if (p.alive && this.state.matchPhase === "live") this.dropEverything(p);
     p.spectator = true;
     p.alive = false;
@@ -509,10 +534,27 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
       const slot = player.slots[player.active];
       const held = heldStats(slot.weapon);
-      applyInput(player, input, dtMs, this.map, held.moveMul * (player.boots > 0 ? BOOTS_SPEED_MUL : 1));
+      const vehicle = player.vehicle ? this.state.vehicles.get(player.vehicle) : undefined;
+      if (vehicle && isVehicleKind(vehicle.kind)) {
+        // Riding: the vehicle's speed and size (weapons and boots don't matter), it goes where you go.
+        const stats = VEHICLES[vehicle.kind];
+        applyInput(player, input, dtMs, this.map, stats.speedMul, stats.radius);
+        vehicle.x = player.x;
+        vehicle.y = player.y;
+        if (isMoving(input)) {
+          const want = Math.atan2((input.down ? 1 : 0) - (input.up ? 1 : 0), (input.right ? 1 : 0) - (input.left ? 1 : 0));
+          const turn = angleDelta(vehicle.heading, want);
+          const max = (VEHICLE_TURN_PER_SEC * dtMs) / 1000;
+          vehicle.heading += Math.max(-max, Math.min(max, turn));
+          if (stats.ramDamage > 0) this.ram(player.vehicle, vehicle, sessionId, player, now);
+          if (!player.alive) return;
+        }
+      } else {
+        applyInput(player, input, dtMs, this.map, held.moveMul * (player.boots > 0 ? BOOTS_SPEED_MUL : 1));
+        // Speed boots wear out while you run (only while moving), then they're gone.
+        if (player.boots > 0 && isMoving(input)) setBoots(player, player.bootsMs - dtMs);
+      }
       player.angle = input.angle;
-      // Speed boots wear out while you run (only while moving), then they're gone.
-      if (player.boots > 0 && isMoving(input)) setBoots(player, player.bootsMs - dtMs);
 
       // In the red: lose ZONE_DAMAGE_PER_SEC the moment you touch it, then again every second.
       // (Stepping in and out can't hurt you faster than once per second. Vests don't help.)
@@ -674,7 +716,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       const t = i / 5;
       const x = player.x + (muzzle.x - player.x) * t;
       const y = player.y + (muzzle.y - player.y) * t;
-      if (this.map.pointBlocked(x, y)) {
+      if (this.map.pointBlocked(x, y, true)) {
         const end: BulletEndEvent = { id: bullet.id, x, y, hit: "" };
         this.broadcast("bulletEnd", end);
         if (bullet.splash) this.explode(freeX, freeY, owner, bullet.weapon, bullet.splash, now, player.team);
@@ -765,7 +807,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     const hand = muzzlePosition(player, player.angle, gun.muzzle);
     const g = new Grenade();
     // Up against a wall: it drops at your feet instead of inside the wall.
-    const start = this.map.pointBlocked(hand.x, hand.y) ? { x: player.x, y: player.y } : hand;
+    const start = this.map.pointBlocked(hand.x, hand.y, true) ? { x: player.x, y: player.y } : hand;
     g.x = start.x;
     g.y = start.y;
     g.owner = owner;
@@ -861,7 +903,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       if (Math.abs(angleDelta(player.angle, Math.atan2(dy, dx))) > stats.arc / 2 + slack) return;
       // No hitting through walls.
       for (let t = 0.25; t < 1; t += 0.25) {
-        if (this.map.pointBlocked(player.x + dx * t, player.y + dy * t)) return;
+        if (this.map.pointBlocked(player.x + dx * t, player.y + dy * t, true)) return;
       }
       this.hurt(target, targetId, owner, stats.damage, now, weapon);
       hits.push(targetId);
@@ -886,7 +928,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
    * Damage a player. `attackerId` is "" for the zone. A vest soaks up most of a bullet or
    * melee hit until it runs out (not zone damage). Returns true if the vest took some.
    */
-  private hurt(target: Player, targetId: string, attackerId: string, amount: number, now: number, weapon: WeaponId | "zone"): boolean {
+  private hurt(target: Player, targetId: string, attackerId: string, amount: number, now: number, weapon: WeaponId | "zone" | "car"): boolean {
     if (this.state.matchPhase === "ended") return false; // the match is decided: no more damage
 
     let armored = false;
@@ -903,6 +945,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     const live = this.state.matchPhase === "live";
     const teams = this.mode === "teams";
     if (live && !teams) target.place = this.countAlive(); // e.g. 5 left → 5th place
+    this.dismount(target, targetId, false); // the vehicle stays where it was
     target.alive = false;
     target.deaths++;
     target.reloading = false;
@@ -936,6 +979,11 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
   /** Back in the game: full health, no vest, just the starting pistol. Team mode: at your base. */
   private respawn(player: Player) {
     if (player.spectator) return;
+    if (player.vehicle) {
+      const v = this.state.vehicles.get(player.vehicle);
+      if (v) v.rider = "";
+      player.vehicle = "";
+    }
     const spot = this.map.findFreeSpot(PLAYER_RADIUS, PLAYER_RADIUS * 2, Math.random, this.spawnArea(player));
     player.x = spot.x;
     player.y = spot.y;
@@ -949,6 +997,114 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     const start = gunStats(STARTING_WEAPON)!;
     setSlot(player.slots[0], STARTING_WEAPON, start.mag, start.mag * 2);
     player.active = 0;
+  }
+
+  // ---------- Vehicles ----------
+
+  /** Park this match's vehicles: some on the roads, and (team mode) a bike and a car at each base. */
+  private spawnVehicles() {
+    this.state.players.forEach((p) => (p.vehicle = "")); // everyone is on foot again
+    this.state.vehicles.clear();
+    this.ramReadyAt.clear();
+    const add = (kind: VehicleKind, x: number, y: number, heading: number) => {
+      const v = new Vehicle();
+      v.kind = kind;
+      v.x = x;
+      v.y = y;
+      v.heading = heading;
+      this.state.vehicles.set(String(this.nextVehicleId++), v);
+    };
+    const counts = ROAD_VEHICLES[this.mode];
+    for (const kind of ["bike", "car"] as VehicleKind[]) {
+      for (let i = 0; i < counts[kind]; i++) {
+        const road = ROADS[Math.floor(Math.random() * ROADS.length)];
+        const along = road.w > road.h ? 0 : Math.PI / 2; // parked along the road
+        const spot = this.map.findFreeSpot(VEHICLES[kind].radius + 6, 4, Math.random, road);
+        add(kind, spot.x, spot.y, along + (Math.random() < 0.5 ? 0 : Math.PI));
+      }
+    }
+    if (this.mode === "teams") {
+      for (const team of TEAMS) {
+        const b = BASES[team];
+        // Toward the middle of the map, beside the core.
+        const sx = b.x < ARENA_SIZE / 2 ? 1 : -1;
+        const sy = b.y < ARENA_SIZE / 2 ? 1 : -1;
+        add("bike", b.x + sx * 130, b.y, sx > 0 ? 0 : Math.PI);
+        add("car", b.x, b.y + sy * 135, sy > 0 ? Math.PI / 2 : -Math.PI / 2);
+      }
+    }
+  }
+
+  /** Get on the closest free vehicle in reach. You sit in the middle of it. */
+  private mount(p: Player, sessionId: string) {
+    let best: { v: Vehicle; id: string; d: number } | undefined;
+    this.state.vehicles.forEach((v, id) => {
+      if (v.rider || !isVehicleKind(v.kind)) return;
+      const d = Math.hypot(v.x - p.x, v.y - p.y) - VEHICLES[v.kind].radius;
+      if (d <= PLAYER_RADIUS + VEHICLE_REACH && (!best || d < best.d)) best = { v, id, d };
+    });
+    if (!best) return;
+    best.v.rider = sessionId;
+    p.vehicle = best.id;
+    p.x = best.v.x;
+    p.y = best.v.y;
+    this.map.resolveCollisions(p, VEHICLES[best.v.kind as VehicleKind].radius);
+    best.v.x = p.x;
+    best.v.y = p.y;
+  }
+
+  /** Get off: the vehicle stays put, you step out beside it (`stepOut` false: you stay where you are). */
+  private dismount(p: Player, _sessionId: string, stepOut = true) {
+    if (!p.vehicle) return;
+    const v = this.state.vehicles.get(p.vehicle);
+    p.vehicle = "";
+    if (!v) return;
+    v.rider = "";
+    if (!stepOut || !isVehicleKind(v.kind)) return;
+    // Out to the side (left or right of the heading), wherever there's room.
+    const out = VEHICLES[v.kind].width / 2 + PLAYER_RADIUS + 4;
+    for (const side of [Math.PI / 2, -Math.PI / 2, Math.PI, 0]) {
+      const a = v.heading + side;
+      const x = clamp(v.x + Math.cos(a) * out, PLAYER_RADIUS, ARENA_SIZE - PLAYER_RADIUS);
+      const y = clamp(v.y + Math.sin(a) * out, PLAYER_RADIUS, ARENA_SIZE - PLAYER_RADIUS);
+      const pos = { x, y };
+      this.map.resolveCollisions(pos, PLAYER_RADIUS);
+      if (Math.hypot(pos.x - x, pos.y - y) < 1) {
+        p.x = x;
+        p.y = y;
+        return;
+      }
+    }
+  }
+
+  /** A car driving into an enemy: damage and a shove (at most once per RAM_COOLDOWN_MS per victim). */
+  private ram(vehicleId: string, v: Vehicle, driverId: string, driver: Player, now: number) {
+    const stats = VEHICLES[v.kind as VehicleKind];
+    this.state.players.forEach((target, targetId) => {
+      if (targetId === driverId || !target.alive || target.spectator || this.sameTeam(driver.team, target.team)) return;
+      const dx = target.x - v.x;
+      const dy = target.y - v.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > stats.radius + PLAYER_RADIUS) return;
+      const key = `${vehicleId}:${targetId}`;
+      if (now < (this.ramReadyAt.get(key) ?? 0)) return;
+      this.ramReadyAt.set(key, now + RAM_COOLDOWN_MS);
+      // Shoved out of the way (a rider stays on their own vehicle, so move that too).
+      const nx = dist > 0.01 ? dx / dist : Math.cos(v.heading);
+      const ny = dist > 0.01 ? dy / dist : Math.sin(v.heading);
+      const theirs = target.vehicle ? this.state.vehicles.get(target.vehicle) : undefined;
+      const radius = theirs && isVehicleKind(theirs.kind) ? VEHICLES[theirs.kind].radius : PLAYER_RADIUS;
+      target.x = clamp(target.x + nx * RAM_PUSH_PX, radius, ARENA_SIZE - radius);
+      target.y = clamp(target.y + ny * RAM_PUSH_PX, radius, ARENA_SIZE - radius);
+      this.map.resolveCollisions(target, radius);
+      if (theirs) {
+        theirs.x = target.x;
+        theirs.y = target.y;
+      }
+      const ev: RamEvent = { owner: driverId, victim: targetId, x: target.x, y: target.y };
+      this.broadcast("ram", ev);
+      this.hurt(target, targetId, driverId, stats.ramDamage, now, "car");
+    });
   }
 
   // ---------- Items on the ground ----------
@@ -1250,6 +1406,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     this.state.grenades.clear();
     this.newMap(); // a brand-new random map for every match
     this.spawnLoot(this.playerCount()); // and fresh loot (placed once; nothing respawns during the match)
+    this.spawnVehicles();
     // Everyone starts equal
     s.players.forEach((p) => {
       p.kills = 0;

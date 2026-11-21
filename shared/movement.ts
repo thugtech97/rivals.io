@@ -27,8 +27,8 @@ export function isMoving(input: InputState): boolean {
  * Moves `pos` according to `input` for `dtMs` milliseconds and keeps it inside the arena.
  * Runs on the server (authoritative) and on the client (prediction for your own player).
  */
-/** `speedMul` scales walking speed (heavy weapons slow you down). */
-export function applyInput(pos: Position, input: InputState, dtMs: number, map: GameMap, speedMul = 1): void {
+/** `speedMul` scales walking speed (heavy weapons slow you down). `radius`: a vehicle is bigger. */
+export function applyInput(pos: Position, input: InputState, dtMs: number, map: GameMap, speedMul = 1, radius = PLAYER_RADIUS): void {
   let dx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
   let dy = (input.down ? 1 : 0) - (input.up ? 1 : 0);
   if (dx === 0 && dy === 0) return;
@@ -43,12 +43,12 @@ export function applyInput(pos: Position, input: InputState, dtMs: number, map: 
   const steps = Math.max(1, Math.ceil(total / 6));
   const step = total / steps;
   for (let i = 0; i < steps; i++) {
-    pos.x = clamp(pos.x + dx * step, PLAYER_RADIUS, ARENA_SIZE - PLAYER_RADIUS);
-    pos.y = clamp(pos.y + dy * step, PLAYER_RADIUS, ARENA_SIZE - PLAYER_RADIUS);
-    map.resolveCollisions(pos, PLAYER_RADIUS);
+    pos.x = clamp(pos.x + dx * step, radius, ARENA_SIZE - radius);
+    pos.y = clamp(pos.y + dy * step, radius, ARENA_SIZE - radius);
+    map.resolveCollisions(pos, radius);
   }
-  pos.x = clamp(pos.x, PLAYER_RADIUS, ARENA_SIZE - PLAYER_RADIUS);
-  pos.y = clamp(pos.y, PLAYER_RADIUS, ARENA_SIZE - PLAYER_RADIUS);
+  pos.x = clamp(pos.x, radius, ARENA_SIZE - radius);
+  pos.y = clamp(pos.y, radius, ARENA_SIZE - radius);
 }
 
 export function clamp(value: number, min: number, max: number): number {

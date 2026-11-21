@@ -3,7 +3,9 @@ import { Callbacks, type Room } from "@colyseus/sdk";
 import { ARENA_SIZE, MATCH_MIN_PLAYERS, PICKUP_RADIUS, PLAYER_MAX_HP, PLAYER_RADIUS, RESPAWN_MS } from "../../shared/constants";
 import { sfx } from "./sound";
 import { angleDelta, applyInput, isMoving, muzzlePosition, NO_INPUT, type InputState } from "../../shared/movement";
-import type { BulletEndEvent, CoreDestroyedEvent, ExplosionEvent, KillEvent, ShotEvent, SwingEvent } from "../../shared/messages";
+import type { BulletEndEvent, CoreDestroyedEvent, ExplosionEvent, KillEvent, RamEvent, ShotEvent, SwingEvent } from "../../shared/messages";
+import { isVehicleKind, VEHICLE_REACH, VEHICLE_TURN_PER_SEC, VEHICLES, type VehicleKind } from "../../shared/vehicles";
+import type { CircleObstacle } from "../../shared/map";
 import {
   CORE_MAX_HP,
   CORE_RADIUS,
@@ -71,6 +73,8 @@ interface PlayerData {
   team: string;
   /** Only watching. */
   spectator: boolean;
+  /** Id of the vehicle being ridden ("" on foot). */
+  vehicle: string;
   active: number;
   reloading: boolean;
   slots: ArrayLike<SlotData> & { at?: (i: number) => SlotData | undefined };
@@ -96,6 +100,29 @@ interface ZoneData {
   nextX: number;
   nextY: number;
   nextSize: number;
+}
+
+interface VehicleData {
+  kind: string; // bike | car
+  x: number;
+  y: number;
+  heading: number;
+  rider: string;
+}
+
+interface VehicleView {
+  data: VehicleData;
+  img: Phaser.GameObjects.Image;
+  /** Shown heading (smoothed; our own is predicted from the keys we hold). */
+  heading: number;
+}
+
+/** A tree someone is hiding in: its canopy shakes. */
+interface ShakingTree {
+  img: Phaser.GameObjects.Image;
+  /** 0..1, how hard it shakes (eases toward the target each frame). */
+  amount: number;
+  target: number;
 }
 
 interface CoreData {
@@ -141,6 +168,14 @@ interface PlayerView {
   trailInMs: number;
   /** Healing sparkles are throttled (the base fountain heals a little every update). */
   nextHealFxAt: number;
+  /** The tree they're hiding in right now (undefined = not in a tree). */
+  tree?: CircleObstacle;
+  /** Shooting / getting hit gives a hiding spot away until then. */
+  revealUntil: number;
+  /** Next leaf rustle while moving inside a tree. */
+  nextRustleAt: number;
+  /** Vehicle id last frame (getting on / off snaps our predicted position). */
+  lastVehicle: string;
 }
 
 interface BulletView {
@@ -210,6 +245,9 @@ export class GameScene extends Phaser.Scene {
   private views = new Map<string, PlayerView>();
   /** Team mode: the two bases. */
   private cores = new Map<string, CoreView>();
+  private vehicles = new Map<string, VehicleView>();
+  /** Canopies currently shaking (or settling back down). */
+  private shaking = new Map<CircleObstacle, ShakingTree>();
   private bullets = new Map<number, BulletView>();
   private items = new Map<string, { obj: Phaser.GameObjects.Container; data: ItemData; glow: Phaser.GameObjects.Image; phase: number }>();
   /** Thrown grenades (synced positions) and their blinking fuse light. */
@@ -231,7 +269,7 @@ export class GameScene extends Phaser.Scene {
   private lastPhase = "";
   private map?: GameMap;
   /** Everything renderMap() created, destroyed when the map changes. */
-  private rendered: RenderedMap = { objects: [], textures: [] };
+  private rendered: RenderedMap = { objects: [], textures: [], canopies: new Map() };
   /** Stops listening for quality changes when the scene goes away. */
   private offQuality?: () => void;
   private zoneGfx!: Phaser.GameObjects.Graphics;
@@ -267,8 +305,10 @@ export class GameScene extends Phaser.Scene {
     this.lastPhase = "";
     this.views.clear();
     this.cores.clear();
+    this.vehicles.clear();
+    this.shaking.clear();
     this.map = undefined;
-    this.rendered = { objects: [], textures: [] };
+    this.rendered = { objects: [], textures: [], canopies: new Map() };
     this.killedBy = "";
     this.killedById = "";
     this.spectating = "";
@@ -304,6 +344,7 @@ export class GameScene extends Phaser.Scene {
         if (a === "reload") this.room.send("reload");
         else if (a === "pickup") this.room.send("pickup");
         else if (a === "drop") this.room.send("drop");
+        else if (a === "ride") this.room.send("ride");
         else this.cycleSlot(1);
       };
     }
@@ -319,6 +360,7 @@ export class GameScene extends Phaser.Scene {
     };
     kb.on("keydown-G", () => this.room.send("drop"));
     kb.on("keydown-E", () => this.room.send("pickup"));
+    kb.on("keydown-F", () => this.room.send("ride")); // get on / off a vehicle
     (["ONE", "TWO", "THREE", "FOUR", "FIVE"] as const)
       .slice(0, SLOT_COUNT)
       .forEach((key, i) => kb.on(`keydown-${key}`, () => this.selectSlot(i)));
@@ -374,6 +416,14 @@ export class GameScene extends Phaser.Scene {
       this.views.delete(key as string);
     });
 
+    // Motorbikes and cars.
+    $.onAdd("vehicles", (v, key) => this.addVehicle(key as string, v as unknown as VehicleData));
+    $.onRemove("vehicles", (_v, key) => {
+      this.vehicles.get(key as string)?.img.destroy();
+      this.vehicles.delete(key as string);
+    });
+    this.room.onMessage("ram", (ev: RamEvent) => this.ramEffect(ev));
+
     // Team mode: the two bases.
     $.onAdd("cores", (core, key) => this.addCore(key as string, core as unknown as CoreData));
     $.onRemove("cores", (_core, key) => this.removeCore(key as string));
@@ -400,7 +450,7 @@ export class GameScene extends Phaser.Scene {
             ? `${TEAM_NAME[baseTeam]} base`
             : (this.views.get(kill.killer)?.data.name ?? "Someone");
       const victim = this.views.get(kill.victim)?.data.name ?? "Someone";
-      const weapon = kill.weapon === "zone" ? "" : WEAPONS[kill.weapon as WeaponId]?.name ?? "";
+      const weapon = kill.weapon === "zone" ? "" : kill.weapon === "car" ? "Car" : (WEAPONS[kill.weapon as WeaponId]?.name ?? "");
       this.hud.addKill(killer, victim, weapon);
       if (kill.victim === this.room.sessionId) {
         this.killedBy = killer;
@@ -431,7 +481,10 @@ export class GameScene extends Phaser.Scene {
 
       // Respawned, or moved to a new spot at match start: jump straight there (no sliding across the map).
       const shown = isMe ? this.me : soldier.root;
-      if ((data.alive && !view.wasAlive) || Math.hypot(data.x - shown.x, data.y - shown.y) > TELEPORT_PX) {
+      // (Getting on / off a vehicle moves you a little too: snap so prediction starts from there.)
+      const hopped = data.vehicle !== view.lastVehicle;
+      view.lastVehicle = data.vehicle;
+      if ((data.alive && !view.wasAlive) || hopped || Math.hypot(data.x - shown.x, data.y - shown.y) > TELEPORT_PX) {
         soldier.root.setPosition(data.x, data.y);
         if (isMe) this.me = { x: data.x, y: data.y };
       }
@@ -444,6 +497,7 @@ export class GameScene extends Phaser.Scene {
       if (data.hp !== view.lastHp || data.armor !== view.lastArmor) {
         if (data.hp < view.lastHp) {
           this.flashHit(soldier);
+          view.revealUntil = time + REVEAL_MS; // getting hit gives a hiding spot away
           // Bullet / blade hits already sprayed blood; this covers the zone.
           if (time - view.lastBulletHitAt > 300) this.blood.wound(soldier.root.x, soldier.root.y);
           if (isMe) {
@@ -490,8 +544,10 @@ export class GameScene extends Phaser.Scene {
 
       if (isMe && data.alive) {
         // Our player: predict locally so movement and aim feel instant (heavy weapons are slower)...
-        const speedMul = heldStats(heldId).moveMul * (data.boots > 0 ? BOOTS_SPEED_MUL : 1);
-        if (this.map) applyInput(this.me, this.myInput, delta, this.map, speedMul);
+        const ride = this.vehicles.get(data.vehicle);
+        const stats = ride && isVehicleKind(ride.data.kind) ? VEHICLES[ride.data.kind] : undefined;
+        const speedMul = stats ? stats.speedMul : heldStats(heldId).moveMul * (data.boots > 0 ? BOOTS_SPEED_MUL : 1);
+        if (this.map) applyInput(this.me, this.myInput, delta, this.map, speedMul, stats?.radius);
         // ...then drift toward the server's position (gentle while moving, firm when stopped).
         const dist = Phaser.Math.Distance.Between(this.me.x, this.me.y, data.x, data.y);
         const pull = !isMoving(this.myInput) ? smoothing * 0.5 : dist > 120 ? 0.3 : 0;
@@ -507,6 +563,8 @@ export class GameScene extends Phaser.Scene {
       }
     });
 
+    this.updateVehicles(delta, remoteSmoothing);
+    this.updateHiding(time, delta);
     this.updateBullets(this.time.now, delta);
     this.updateCores(this.time.now);
     this.updateGrenades(smoothing);
@@ -544,7 +602,7 @@ export class GameScene extends Phaser.Scene {
     this.views.forEach((v, id) => {
       const pos = id === this.room.sessionId ? this.me : v.soldier.root;
       const moved = Math.hypot(pos.x - v.stepX, pos.y - v.stepY);
-      if (!v.data.alive || moved > TELEPORT_PX) {
+      if (!v.data.alive || v.data.vehicle || moved > TELEPORT_PX) {
         v.stepX = pos.x;
         v.stepY = pos.y;
       } else if (moved >= STRIDE_PX) {
@@ -623,6 +681,7 @@ export class GameScene extends Phaser.Scene {
     // Team mode maps have open ground and a core at each base (same as the server's).
     if (this.map?.seed !== seed || this.map.mode !== this.mode) this.map = new GameMap(seed, this.mode);
     this.rendered = renderMap(this, this.map!, qualitySettings().mapResolution);
+    this.shaking.clear(); // those canopy images are gone
     this.tryReady();
   }
 
@@ -1037,9 +1096,10 @@ export class GameScene extends Phaser.Scene {
         slots.push({ name: sl.weapon ? heldStats(sl.weapon).name : "", ammo, active: i === d.active });
       }
       this.hud.setSlots(d.alive ? slots : null);
-      const prompt = d.alive ? this.pickupPrompt(d) : "";
-      this.hud.setPrompt(isTouchMode() ? prompt.replace(/^E:/, "✋") : prompt);
-      this.touch?.setPickupHint(!!prompt);
+      const prompt = d.alive ? this.pickupPrompt(d) || this.ridePrompt(d) : "";
+      this.hud.setPrompt(isTouchMode() ? prompt.replace(/^E:/, "✋").replace(/^F:/, "🚗") : prompt);
+      this.touch?.setPickupHint(prompt.startsWith("E:"));
+      this.touch?.setRideHint(prompt.startsWith("F:"));
 
       const by = this.killedBy ? `Eliminated by ${this.killedBy}` : "Eliminated";
       const switchHint = isTouchMode() ? "tap the screen to switch" : "click / Space / ← → to switch";
@@ -1173,6 +1233,166 @@ export class GameScene extends Phaser.Scene {
     return { others, bases };
   }
 
+  /** "F: ride the Car" next to a free vehicle, "F: get off" while riding. */
+  private ridePrompt(d: PlayerData): string {
+    if (d.vehicle) {
+      const v = this.vehicles.get(d.vehicle);
+      return `F: get off the ${v && isVehicleKind(v.data.kind) ? VEHICLES[v.data.kind].name : "vehicle"}`;
+    }
+    const v = this.nearestFreeVehicle();
+    return v ? `F: ride the ${VEHICLES[v.data.kind as VehicleKind].name}` : "";
+  }
+
+  private nearestFreeVehicle(): VehicleView | undefined {
+    let best: VehicleView | undefined;
+    let bestD = Infinity;
+    this.vehicles.forEach((v) => {
+      if (v.data.rider || !isVehicleKind(v.data.kind)) return;
+      const d = Math.hypot(v.data.x - this.me.x, v.data.y - this.me.y) - VEHICLES[v.data.kind].radius;
+      if (d <= PLAYER_RADIUS + VEHICLE_REACH && d < bestD) {
+        bestD = d;
+        best = v;
+      }
+    });
+    return best;
+  }
+
+  // ---------- Vehicles ----------
+
+  private addVehicle(id: string, data: VehicleData) {
+    const kind: VehicleKind = isVehicleKind(data.kind) ? data.kind : "car";
+    const img = this.add.image(data.x, data.y, vehicleTexture(this, kind)).setScale(1 / VEHICLE_RES).setDepth(8);
+    img.setRotation(data.heading);
+    this.vehicles.set(id, { data, img, heading: data.heading });
+  }
+
+  /** Ridden vehicles sit under their rider (as drawn); parked ones glide to the server's spot. */
+  private updateVehicles(delta: number, smoothing: number) {
+    const turnMax = (VEHICLE_TURN_PER_SEC * delta) / 1000;
+    this.vehicles.forEach((v) => {
+      const rider = v.data.rider ? this.views.get(v.data.rider) : undefined;
+      const mine = v.data.rider === this.room.sessionId;
+      if (rider) {
+        const pos = mine ? this.me : rider.soldier.root;
+        v.img.setPosition(pos.x, pos.y);
+      } else {
+        v.img.x += (v.data.x - v.img.x) * smoothing;
+        v.img.y += (v.data.y - v.img.y) * smoothing;
+        if (Math.hypot(v.data.x - v.img.x, v.data.y - v.img.y) > TELEPORT_PX) v.img.setPosition(v.data.x, v.data.y);
+      }
+      if (mine && isMoving(this.myInput)) {
+        // Our own ride turns right away (same rule as the server), no waiting for an update.
+        const i = this.myInput;
+        const want = Math.atan2((i.down ? 1 : 0) - (i.up ? 1 : 0), (i.right ? 1 : 0) - (i.left ? 1 : 0));
+        v.heading += Phaser.Math.Clamp(angleDelta(v.heading, want), -turnMax, turnMax);
+      } else if (!mine) {
+        v.heading += angleDelta(v.heading, v.data.heading) * Math.min(1, smoothing * 1.5);
+      }
+      v.img.setRotation(v.heading);
+    });
+  }
+
+  /** A car hit someone: a thud and some blood. */
+  private ramEffect(ev: RamEvent) {
+    const victim = this.views.get(ev.victim);
+    const car = this.views.get(ev.owner);
+    const angle = car ? Math.atan2(ev.y - car.soldier.root.y, ev.x - car.soldier.root.x) : Math.random() * Math.PI * 2;
+    this.blood.bulletHit(ev.x, ev.y, angle);
+    if (victim) victim.lastBulletHitAt = this.time.now;
+    sfx.meleeHit(ev.x, ev.y, "axe");
+    if (ev.owner === this.room.sessionId) sfx.hitMarker();
+    const cam = this.cameras.main;
+    if (ev.victim === this.room.sessionId || ev.owner === this.room.sessionId) cam.shake(140, 0.006);
+  }
+
+  // ---------- Hiding in trees ----------
+
+  /**
+   * Who is hiding in a tree: enemies in one disappear (only the tree shaking gives them away);
+   * you and your teammates show faded. Shooting or getting hit reveals you for a moment.
+   * Riders never hide (a car doesn't fit in a tree).
+   */
+  private updateHiding(time: number, delta: number) {
+    const map = this.map;
+    if (!map) return;
+    const meData = this.views.get(this.room.sessionId)?.data;
+    const watcher = !!meData?.spectator || this.isSpectator; // spectators see everyone (faded)
+    const myTree = this.views.get(this.room.sessionId)?.tree;
+    const occupied = new Map<CircleObstacle, boolean>(); // tree → someone moving in it
+
+    this.views.forEach((v, id) => {
+      const isMe = id === this.room.sessionId;
+      const d = v.data;
+      const pos = isMe ? this.me : v.soldier.root;
+      const tree = d.alive && !d.spectator && !d.vehicle ? map.treeAt(pos.x, pos.y) : undefined;
+      const moving = isMe ? isMoving(this.myInput) : Math.hypot(d.x - pos.x, d.y - pos.y) > 2;
+
+      // Into / out of a tree: a burst of leaves and a rustle (everyone can see and hear that).
+      if (tree !== v.tree) {
+        const t = tree ?? v.tree!;
+        this.leafBurst(t.x, t.y, t.r);
+        sfx.rustle(t.x, t.y, isMe);
+        v.tree = tree;
+        v.nextRustleAt = time + 400;
+      } else if (tree && moving && time >= v.nextRustleAt) {
+        sfx.rustle(tree.x, tree.y, isMe);
+        v.nextRustleAt = time + 380 + Math.random() * 200;
+      }
+      if (tree) occupied.set(tree, (occupied.get(tree) ?? false) || moving);
+
+      const friendly = isMe || watcher || (this.mode === "teams" && !!d.team && d.team === this.myTeam);
+      const revealed = time < v.revealUntil;
+      const want = !tree || revealed ? 1 : friendly ? 0.5 : 0;
+      const a = v.soldier.root.alpha;
+      v.soldier.root.setAlpha(a + (want - a) * Math.min(1, delta / 90));
+    });
+
+    // Shake the trees people are in (harder while they move), and let the others settle.
+    occupied.forEach((moving, tree) => {
+      const img = this.rendered.canopies.get(tree);
+      if (!img) return;
+      const s = this.shaking.get(tree) ?? { img, amount: 0, target: 0 };
+      s.target = moving ? 1 : 0.35;
+      this.shaking.set(tree, s);
+    });
+    this.shaking.forEach((s, tree) => {
+      if (!occupied.has(tree)) s.target = 0;
+      s.amount += (s.target - s.amount) * Math.min(1, delta / 120);
+      const wobble = Math.sin(time / 45 + tree.x) * 0.5 + Math.sin(time / 27 + tree.y) * 0.5;
+      s.img.setRotation(wobble * 0.11 * s.amount);
+      s.img.setScale((1 + Math.abs(wobble) * 0.05 * s.amount) / qualitySettings().mapResolution);
+      // Your own tree goes see-through so you can see yourself (and what's around you).
+      s.img.setAlpha(tree === myTree ? 0.45 : 1);
+      if (s.target === 0 && s.amount < 0.01) {
+        s.img.setRotation(0).setScale(1 / qualitySettings().mapResolution).setAlpha(1);
+        this.shaking.delete(tree);
+      }
+    });
+  }
+
+  /** A few leaves flying off a tree. */
+  private leafBurst(x: number, y: number, r: number) {
+    const n = particleCount(7, 3);
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const leaf = this.add
+        .ellipse(x + Math.cos(a) * r * 0.6, y + Math.sin(a) * r * 0.6, 7, 4, Math.random() < 0.5 ? 0x3f7a30 : 0x5a9a44, 1)
+        .setRotation(Math.random() * Math.PI)
+        .setDepth(31);
+      const d = r * (0.6 + Math.random() * 0.8);
+      this.tweens.add({
+        targets: leaf,
+        x: leaf.x + Math.cos(a) * d,
+        y: leaf.y + Math.sin(a) * d + 6,
+        rotation: leaf.rotation + (Math.random() - 0.5) * 4,
+        alpha: 0,
+        duration: 500 + Math.random() * 300,
+        ease: "Cubic.easeOut",
+        onComplete: () => leaf.destroy(),
+      });
+    }
+  }
+
   /** "E: swap …" hint when standing on something that needs E. */
   private pickupPrompt(d: PlayerData): string {
     const near = this.nearestItem(this.me.x, this.me.y, ITEM_REACH);
@@ -1209,6 +1429,9 @@ export class GameScene extends Phaser.Scene {
       stepY: data.y,
       trailInMs: 0,
       nextHealFxAt: 0,
+      revealUntil: 0,
+      nextRustleAt: 0,
+      lastVehicle: data.vehicle ?? "",
     });
 
     if (isMe) {
@@ -1276,9 +1499,10 @@ export class GameScene extends Phaser.Scene {
     // ahead (prediction) and others behind (smoothing). Start the tracer and flash at the gun
     // tip as drawn, then let the tracer slide onto the real path (hits are still server-side).
     const shooter = this.views.get(shot.owner);
+    if (shooter) shooter.revealUntil = this.time.now + REVEAL_MS; // shooting gives a hiding spot away
     let startX = shot.x;
     let startY = shot.y;
-    if (shooter?.soldier.root.visible) {
+    if (shooter?.soldier.root.visible && shooter.soldier.root.alpha > 0.05) {
       const s = shooter.soldier;
       const tip = muzzlePosition({ x: s.root.x + s.body.x, y: s.root.y + s.body.y }, s.body.rotation, gun.muzzle);
       if (Math.hypot(tip.x - shot.x, tip.y - shot.y) <= TRACER_MAX_OFFSET_PX) {
@@ -1488,6 +1712,7 @@ export class GameScene extends Phaser.Scene {
   private swingEffect(ev: SwingEvent) {
     const attacker = this.views.get(ev.owner);
     const stats = WEAPONS[ev.weapon];
+    if (attacker) attacker.revealUntil = this.time.now + REVEAL_MS;
     if (attacker) {
       const arms = attacker.soldier.arms;
       const wide = stats?.kind === "melee" ? Math.min(1.1, stats.arc / 2) : 0.8;
@@ -1625,6 +1850,11 @@ function formatTime(totalSeconds: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+/** Shooting, swinging or getting hit inside a tree shows you for this long. */
+const REVEAL_MS = 1200;
+/** Vehicles are baked at this many pixels per world pixel. */
+const VEHICLE_RES = 2;
+
 /** Base towers are baked at this many pixels per world pixel. */
 const CORE_RES = 2;
 /** Width of a base's health bar (world pixels). */
@@ -1643,6 +1873,73 @@ function glowTexture(scene: Phaser.Scene, color: number): string {
     g.fillCircle(0, 0, 22);
     g.lineStyle(1.5, color, 0.6);
     g.strokeCircle(0, 0, 22);
+  });
+  return key;
+}
+
+/**
+ * Texture key for a vehicle seen from above, facing right (angle 0), baked once per kind.
+ * The rider is drawn on top, in the middle.
+ */
+function vehicleTexture(scene: Phaser.Scene, kind: VehicleKind): string {
+  const key = `vehicle-${kind}`;
+  const { length: L, width: W } = VEHICLES[kind];
+  bakeShape(scene, key, L + 10, W + 12, VEHICLE_RES, (g) => {
+    if (kind === "bike") {
+      g.fillStyle(0x000000, 0.3);
+      g.fillEllipse(3, 4, L, W * 0.8);
+      // Wheels front and back
+      g.fillStyle(0x15171c, 1);
+      g.fillRoundedRect(L / 2 - 14, -4, 14, 8, 3);
+      g.fillRoundedRect(-L / 2, -4, 14, 8, 3);
+      // Frame and tank
+      g.fillStyle(0xc0392b, 1);
+      g.fillRoundedRect(-L / 2 + 8, -W / 2 + 3, L - 16, W - 6, 5);
+      g.fillStyle(0xe25a4a, 1);
+      g.fillRoundedRect(2, -W / 2 + 4, 12, W - 8, 4);
+      // Seat
+      g.fillStyle(0x2b2b2b, 1);
+      g.fillRoundedRect(-12, -4, 14, 8, 3);
+      // Handlebars and headlight
+      g.lineStyle(3, 0x9aa3b5, 1);
+      g.lineBetween(L / 2 - 16, -W / 2 - 3, L / 2 - 16, W / 2 + 3);
+      g.fillStyle(0xfff1b0, 1);
+      g.fillCircle(L / 2 - 2, 0, 2.5);
+      // Exhaust
+      g.fillStyle(0x8b949c, 1);
+      g.fillRect(-L / 2 + 2, W / 2 - 3, 14, 3);
+      return;
+    }
+    // Car: an open-top jeep
+    g.fillStyle(0x000000, 0.3);
+    g.fillRoundedRect(-L / 2 + 4, -W / 2 + 4, L, W, 8);
+    g.fillStyle(0x15171c, 1);
+    for (const wx of [L / 2 - 18, -L / 2 + 6]) {
+      g.fillRoundedRect(wx, -W / 2 - 3, 13, 7, 2);
+      g.fillRoundedRect(wx, W / 2 - 4, 13, 7, 2);
+    }
+    g.fillStyle(0x5d6b3a, 1);
+    g.fillRoundedRect(-L / 2, -W / 2, L, W, 8);
+    g.lineStyle(2, 0x3b4524, 1);
+    g.strokeRoundedRect(-L / 2, -W / 2, L, W, 8);
+    // Hood with a star, windshield, seats in the open back
+    g.fillStyle(0x6c7b45, 1);
+    g.fillRoundedRect(L / 2 - 22, -W / 2 + 3, 19, W - 6, 5);
+    g.fillStyle(0xd9d9c9, 0.9);
+    g.fillCircle(L / 2 - 12, 0, 3);
+    g.fillStyle(0x9fc7d9, 0.85);
+    g.fillRect(L / 2 - 27, -W / 2 + 4, 4, W - 8);
+    g.fillStyle(0x2f3622, 1);
+    g.fillRoundedRect(-L / 2 + 6, -W / 2 + 5, L - 36, W - 10, 4);
+    g.fillStyle(0x7a5a3a, 1);
+    g.fillRoundedRect(-L / 2 + 10, -W / 2 + 8, 12, 8, 2);
+    g.fillRoundedRect(-L / 2 + 10, W / 2 - 16, 12, 8, 2);
+    // Headlights and spare wheel
+    g.fillStyle(0xfff1b0, 1);
+    g.fillCircle(L / 2 - 1, -W / 2 + 6, 2.5);
+    g.fillCircle(L / 2 - 1, W / 2 - 6, 2.5);
+    g.fillStyle(0x15171c, 1);
+    g.fillCircle(-L / 2 - 1, 0, 6);
   });
   return key;
 }

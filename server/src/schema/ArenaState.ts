@@ -37,6 +37,8 @@ export class Player extends Schema {
   @type("number") armor = 0;
   /** Speed boots charge left, 0-100 % (0 = no boots). */
   @type("number") boots = 0;
+  /** Id (key in ArenaState.vehicles) of the vehicle you're riding, "" on foot. */
+  @type("string") vehicle = "";
   /** Inventory: SLOT_COUNT weapon slots, and which one is in hand. */
   @type([WeaponSlot]) slots = new ArraySchema<WeaponSlot>(...Array.from({ length: SLOT_COUNT }, () => new WeaponSlot()));
   @type("number") active = 0;
@@ -56,6 +58,18 @@ export class Player extends Schema {
   healCarry = 0;
   /** When this player joined (team balancing moves the newest players first). */
   joinedAt = 0;
+}
+
+/** A rideable motorbike or car (see shared/vehicles.ts). Placed at match start, never destroyed. */
+export class Vehicle extends Schema {
+  /** "bike" | "car" */
+  @type("string") kind = "bike";
+  @type("number") x = 0;
+  @type("number") y = 0;
+  /** Which way it faces (radians). */
+  @type("number") heading = 0;
+  /** sessionId of whoever is riding it, "" = parked. */
+  @type("string") rider = "";
 }
 
 /** Team mode: a team's base core. Destroy the enemy's to win. */
@@ -165,4 +179,5 @@ export class ArenaState extends Schema {
   @type({ map: Grenade }) grenades = new MapSchema<Grenade>();
   /** Team mode: keyed by team ("blue" / "red"). Empty in solo mode. */
   @type({ map: Core }) cores = new MapSchema<Core>();
+  @type({ map: Vehicle }) vehicles = new MapSchema<Vehicle>();
 }

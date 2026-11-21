@@ -41,6 +41,14 @@ export type RectStyle =
 
 export type CircleStyle = "tree" | "rock" | "barrel" | "fountain" | "silo" | "statue" | "core";
 
+/**
+ * Trees are hiding spots: soldiers (and vehicles) walk right into them, and only the trunk
+ * in the middle (this radius) stops bullets, grenades and blasts.
+ */
+export const TREE_TRUNK_RADIUS = 9;
+/** Standing this far inside a tree's circle (center within r - this) hides you in it. */
+export const TREE_HIDE_INSET = 2;
+
 /** Decorative ground areas (no collision). */
 export type GroundKind = "field" | "concrete" | "gravel" | "paving";
 export interface GroundArea {
@@ -418,10 +426,25 @@ export class GameMap {
 
   // ---------- Collision queries ----------
 
-  /** True if a point is inside any obstacle (used for bullets). */
-  pointBlocked(x: number, y: number): boolean {
-    for (const o of this.obstacles) if (distanceTo(o, x, y) <= 0) return true;
+  /**
+   * True if a point is inside any obstacle (used for bullets). Trees: only their trunk, and
+   * not at all with `ignoreTrees` (shooting out of the tree you're hiding in).
+   */
+  pointBlocked(x: number, y: number, ignoreTrees = false): boolean {
+    for (const o of this.obstacles) {
+      if (o.kind === "circle" && o.style === "tree") {
+        if (!ignoreTrees && Math.hypot(x - o.x, y - o.y) <= TREE_TRUNK_RADIUS) return true;
+      } else if (distanceTo(o, x, y) <= 0) return true;
+    }
     return false;
+  }
+
+  /** The tree a soldier standing at (x, y) is hiding in, if any. */
+  treeAt(x: number, y: number): CircleObstacle | undefined {
+    for (const o of this.obstacles) {
+      if (o.kind === "circle" && o.style === "tree" && Math.hypot(x - o.x, y - o.y) <= o.r - TREE_HIDE_INSET) return o;
+    }
+    return undefined;
   }
 
   /** Push a circle (a soldier) out of any obstacle it overlaps. Lets you slide along walls. */
@@ -429,6 +452,7 @@ export class GameMap {
     for (let pass = 0; pass < 2; pass++) {
       for (const o of this.obstacles) {
         if (o.kind === "circle") {
+          if (o.style === "tree") continue; // walk right in: trees are hiding spots
           const dx = pos.x - o.x;
           const dy = pos.y - o.y;
           const min = o.r + radius;

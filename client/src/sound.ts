@@ -252,6 +252,38 @@ export class Sfx {
     this.noiseHit(out.node, out.t + 0.01, { type: "bandpass", freq: 1800, vol: 0.12, decay: 0.03 }); // grit
   }
 
+  /** Leaves rustling: someone moving in (or into) a tree. */
+  rustle(x: number, y: number, mine: boolean) {
+    const out = this.at(x, y, mine ? 0.3 : 0.4, 1.1, mine);
+    if (!out) return;
+    this.noiseHit(out.node, out.t, { type: "bandpass", freq: 2600 + Math.random() * 1400, vol: 0.9, decay: 0.16, sweepTo: 1500 });
+    this.noiseHit(out.node, out.t + 0.05, { type: "highpass", freq: 3800, vol: 0.4, decay: 0.12 });
+  }
+
+  /** An engine starting (getting on a vehicle): a low rumbling vroom. */
+  engineStart(x: number, y: number, mine: boolean, kind: string) {
+    const out = this.at(x, y, mine ? 0.5 : 0.4, 1.3, mine);
+    if (!out) return;
+    const { ctx, node, t } = out;
+    const base = kind === "bike" ? 70 : 48;
+    const osc = ctx.createOscillator();
+    osc.type = "sawtooth";
+    osc.frequency.setValueAtTime(base, t);
+    osc.frequency.exponentialRampToValueAtTime(base * 2.4, t + 0.25);
+    osc.frequency.exponentialRampToValueAtTime(base * 1.4, t + 0.6);
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.value = 700;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.5, t + 0.05);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.7);
+    osc.connect(lp).connect(g).connect(node);
+    osc.start(t);
+    osc.stop(t + 0.75);
+    this.noiseHit(node, t, { type: "lowpass", freq: 500, vol: 0.5, decay: 0.3 });
+  }
+
   /** Someone picked something up (kind: weapon | ammo | vest | medkit | boots). */
   pickup(x: number, y: number, mine: boolean, kind = "ammo") {
     const out = mine ? this.ui(0.5) : this.at(x, y, 0.35);

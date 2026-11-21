@@ -37,7 +37,15 @@ export interface SwingEvent {
 export interface KillEvent {
   killer: string; // sessionId ("" = the zone, "core:blue" / "core:red" = that team's base turret)
   victim: string; // sessionId
-  weapon: WeaponId | "zone";
+  weapon: WeaponId | "zone" | "car";
+}
+
+/** "ram": a car ran someone over (damage is already applied). */
+export interface RamEvent {
+  owner: string;
+  victim: string;
+  x: number;
+  y: number;
 }
 
 /** "explosion": a rocket or grenade went off. Damage is already applied (synced state). */

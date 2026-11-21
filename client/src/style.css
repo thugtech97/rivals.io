@@ -1423,7 +1423,7 @@ body.touch-mode .controls-help .keys-help {
   right: 14px;
   bottom: 190px;
   display: grid;
-  grid-template-columns: repeat(2, 58px);
+  grid-template-columns: repeat(3, 58px); /* 5 buttons: two rows, so it fits short landscape screens */
   gap: 10px;
   pointer-events: auto;
 }
