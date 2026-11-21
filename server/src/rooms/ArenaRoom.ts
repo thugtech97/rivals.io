@@ -1,5 +1,5 @@
 import { Room, type Client } from "colyseus";
-import { ArenaState, Grenade, GroundItem, Player, WeaponSlot } from "../schema/ArenaState";
+import { ArenaState, Core, Grenade, GroundItem, Player, WeaponSlot } from "../schema/ArenaState";
 import {
   ARENA_SIZE,
   DEFAULT_PLAYERS_PER_ROOM,
@@ -27,7 +27,25 @@ import {
   IDLE_KICK_MS,
 } from "../../../shared/constants";
 import { angleDelta, applyInput, clamp, isMoving, muzzlePosition, NO_INPUT, type InputState } from "../../../shared/movement";
-import type { BulletEndEvent, ExplosionEvent, KillEvent, ShotEvent, SwingEvent } from "../../../shared/messages";
+import type { BulletEndEvent, CoreDestroyedEvent, ExplosionEvent, KillEvent, ShotEvent, SwingEvent } from "../../../shared/messages";
+import {
+  BASE_CLEAR_RADIUS,
+  BASES,
+  CORE_MAX_HP,
+  CORE_RADIUS,
+  FOUNTAIN_HEAL_PER_SEC,
+  FOUNTAIN_RADIUS,
+  isTeam,
+  MAX_SPECTATORS,
+  otherTeam,
+  TEAM_COLOR,
+  TEAM_NAME,
+  TEAM_RESPAWN_MS,
+  TEAMS,
+  TURRET_RANGE,
+  type GameMode,
+  type Team,
+} from "../../../shared/teams";
 import { GameMap, newMapSeed } from "../../../shared/map";
 import {
   BOOTS_DURATION_MS,
@@ -73,21 +91,35 @@ const hostIdleMs = Number(process.env.HOST_IDLE_MS) || HOST_IDLE_MS;
 /** TEST_HOOKS=1 enables a "debugTeleport" message for automated tests. Never set it in production. */
 const TEST_HOOKS = process.env.TEST_HOOKS === "1";
 
-/** Shown in the lobby's room list. */
+/** Shown in the lobby's room list (kept up to date as people join, leave and matches start). */
 export interface ArenaMetadata {
   roomName: string;
   hostName: string;
+  mode: GameMode;
+  /** Playing seats taken / available (spectators have their own seats). */
+  players: number;
+  maxPlayers: number;
+  spectators: number;
+  /** ArenaState.matchPhase: players can only join during "warmup" / "countdown". */
+  phase: string;
 }
 
 interface ArenaOptions {
   roomName?: string;
   maxPlayers?: number;
   playerName?: string;
+  /** "teams" for Blue vs Red (set when creating the room). */
+  mode?: string;
+  /** Join only to watch. */
+  spectate?: boolean;
 }
 
 interface Bullet {
   id: number;
+  /** sessionId of the shooter, or "core:<team>" for a base turret. */
   owner: string;
+  /** Shooter's team ("" in solo mode): bullets fly through teammates. */
+  team: string;
   weapon: WeaponId;
   damage: number;
   speed: number;
@@ -116,21 +148,27 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
   private phaseEndsAt = 0;
   /** This room's map. A new random one is generated for every match. */
   private map!: GameMap;
+  /** Last lobby listing sent (only re-sent when something in it changed). */
+  private listingKey = "";
 
   async onCreate(options: ArenaOptions) {
     this.setState(new ArenaState());
+    this.state.mode = options.mode === "teams" ? "teams" : "solo";
     this.newMap();
     this.resetZone();
+    this.resetCores();
     this.spawnLoot(MATCH_MIN_PLAYERS); // warmup loot; each match spawns its own for its player count
 
     const requested = Math.round(Number(options.maxPlayers) || DEFAULT_PLAYERS_PER_ROOM);
-    this.maxClients = clamp(requested, MIN_PLAYERS_PER_ROOM, MAX_PLAYERS_PER_ROOM);
-    this.state.maxPlayers = this.maxClients;
+    const maxPlayers = clamp(requested, MIN_PLAYERS_PER_ROOM, MAX_PLAYERS_PER_ROOM);
+    this.state.maxPlayers = maxPlayers;
+    // Spectators get seats of their own on top of the playing seats.
+    this.maxClients = maxPlayers + MAX_SPECTATORS;
 
     const hostName = cleanText(options.playerName, NAME_MAX_LENGTH) || "Someone";
     const roomName = cleanText(options.roomName, ROOM_NAME_MAX_LENGTH) || `${hostName}'s arena`;
     this.state.roomName = roomName;
-    await this.setMetadata({ roomName, hostName });
+    await this.setMetadata({ roomName, hostName, mode: this.mode, players: 0, maxPlayers, spectators: 0, phase: "warmup" });
 
     // Clients only send what they're pressing and where they aim; the server decides the rest.
     this.onMessage("input", (client, input: Partial<InputState>) => {
@@ -181,9 +219,38 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     this.onMessage("startMatch", (client) => {
       this.markActive(client.sessionId);
       const s = this.state;
-      if (client.sessionId !== s.hostId || s.matchPhase !== "warmup" || s.players.size < MATCH_MIN_PLAYERS) return;
+      if (client.sessionId !== s.hostId || s.matchPhase !== "warmup" || !this.enoughPlayers()) return;
       this.startCountdown(this.clock.currentTime);
-      console.log(`[${this.roomId}] host started the match early (${s.players.size}/${this.maxClients})`);
+      console.log(`[${this.roomId}] host started the match early (${this.playerCount()}/${s.maxPlayers})`);
+    });
+
+    // Team mode, before the match: switch to the other team (if it has room).
+    this.onMessage("team", (client, wanted: string) => {
+      this.markActive(client.sessionId);
+      const p = this.state.players.get(client.sessionId);
+      const phase = this.state.matchPhase;
+      if (!p || p.spectator || this.mode !== "teams" || !isTeam(wanted) || p.team === wanted) return;
+      if (phase !== "warmup" && phase !== "countdown") return;
+      if (this.teamSize(wanted) >= this.teamCapacity()) return;
+      this.setTeam(p, wanted);
+      this.respawn(p); // over to the new team's base
+    });
+
+    // Watch instead of playing (any time), or start playing again (before a match only).
+    this.onMessage("spectate", (client, on: boolean) => {
+      this.markActive(client.sessionId);
+      const p = this.state.players.get(client.sessionId);
+      if (!p || p.spectator === !!on) return;
+      if (on) {
+        this.makeSpectator(p, client.sessionId);
+      } else {
+        const phase = this.state.matchPhase;
+        if ((phase !== "warmup" && phase !== "countdown") || this.playerCount() >= this.state.maxPlayers) return;
+        p.spectator = false;
+        if (this.mode === "teams") this.setTeam(p, this.smallerTeam());
+        this.respawn(p);
+        this.ensureHost();
+      }
     });
 
     if (TEST_HOOKS) {
@@ -202,24 +269,45 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     this.patchRate = PATCH_MS;
   }
 
-  /** No joining a match that's already being played (the room is also locked then). */
-  onAuth(_client: Client, _options: ArenaOptions) {
+  /**
+   * Spectators can come in any time (while there are spectator seats). Players only before a
+   * match starts, and only while there are playing seats. (Rooms are never locked, or
+   * spectators couldn't join a match in progress.)
+   */
+  onAuth(_client: Client, options: ArenaOptions) {
+    if (options?.spectate) {
+      if (this.spectatorCount() >= MAX_SPECTATORS) throw new Error("No spectator seats left in this room.");
+      return true;
+    }
     const phase = this.state.matchPhase;
-    if (phase === "live" || phase === "ended") throw new Error("A match is in progress, try again in a moment.");
+    if (phase === "live" || phase === "ended") throw new Error("A match is in progress: you can watch it, or try again in a moment.");
+    if (this.playerCount() >= this.state.maxPlayers) throw new Error("This room is full: you can still watch.");
     return true;
   }
 
   onJoin(client: Client, options: ArenaOptions) {
     const player = new Player();
     player.name = cleanText(options?.playerName, NAME_MAX_LENGTH) || `Player ${this.clients.length}`;
-    player.color = COLORS[this.state.players.size % COLORS.length];
-    this.respawn(player);
-
+    player.joinedAt = this.clock.currentTime;
     player.lastActiveAt = this.clock.currentTime;
+    // Two people grabbing the last seat at once: the second one watches instead.
+    const phase = this.state.matchPhase;
+    const canPlay = (phase === "warmup" || phase === "countdown") && this.playerCount() < this.state.maxPlayers;
+    if (options?.spectate || !canPlay) {
+      player.spectator = true;
+      player.alive = false;
+      player.slots.forEach((s) => setSlot(s, ""));
+    } else {
+      if (this.mode === "teams") this.setTeam(player, this.smallerTeam());
+      else player.color = COLORS[this.state.players.size % COLORS.length];
+      this.respawn(player);
+    }
+
     this.state.players.set(client.sessionId, player);
     this.heldKeys.set(client.sessionId, { ...NO_INPUT });
-    if (!this.state.hostId) this.setHost(client.sessionId);
-    console.log(`[${this.roomId}] ${player.name} joined (${this.clients.length}/${this.maxClients})`);
+    this.ensureHost();
+    const as = player.spectator ? "spectator" : player.team ? `${player.team} team` : "player";
+    console.log(`[${this.roomId}] ${player.name} joined as ${as} (${this.playerCount()}/${this.state.maxPlayers} players)`);
   }
 
   onLeave(client: Client) {
@@ -231,13 +319,136 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     this.lastInputAt.delete(client.sessionId);
     console.log(`[${this.roomId}] ${player?.name ?? client.sessionId} left`);
     // The host left: the player who has been here longest takes over.
-    if (this.state.hostId === client.sessionId) this.setHost(this.state.players.keys().next().value ?? "");
+    this.ensureHost();
   }
 
   private setHost(sessionId: string) {
     this.state.hostId = sessionId;
     const name = this.state.players.get(sessionId)?.name;
     if (name) void this.setMetadata({ ...this.metadata, hostName: name });
+  }
+
+  /** The host must be a player (not a spectator): if not, the longest-here player takes over. */
+  private ensureHost() {
+    const host = this.state.players.get(this.state.hostId);
+    if (host && !host.spectator) return;
+    for (const [id, p] of this.state.players) {
+      if (!p.spectator) return this.setHost(id);
+    }
+    if (!host) this.state.hostId = ""; // only spectators left: a spectator host is better than none
+  }
+
+  // ---------- Players, spectators and teams ----------
+
+  private get mode(): GameMode {
+    return this.state.mode === "teams" ? "teams" : "solo";
+  }
+
+  /** People playing (not spectating). */
+  private playerCount(): number {
+    let n = 0;
+    this.state.players.forEach((p) => {
+      if (!p.spectator) n++;
+    });
+    return n;
+  }
+
+  private spectatorCount(): number {
+    let n = 0;
+    this.state.players.forEach((p) => {
+      if (p.spectator) n++;
+    });
+    return n;
+  }
+
+  private teamSize(team: Team): number {
+    let n = 0;
+    this.state.players.forEach((p) => {
+      if (!p.spectator && p.team === team) n++;
+    });
+    return n;
+  }
+
+  /** Each team can have half the room (rounded up). */
+  private teamCapacity(): number {
+    return Math.ceil(this.state.maxPlayers / 2);
+  }
+
+  private smallerTeam(): Team {
+    const blue = this.teamSize("blue");
+    const red = this.teamSize("red");
+    if (blue !== red) return blue < red ? "blue" : "red";
+    return Math.random() < 0.5 ? "blue" : "red";
+  }
+
+  /** Join a team: its color, and (on the next respawn) its base. */
+  private setTeam(p: Player, team: Team) {
+    p.team = team;
+    p.color = TEAM_COLOR[team];
+  }
+
+  /** Same side? (Never true in solo mode, or for yourself vs. yourself: that's handled separately.) */
+  private sameTeam(teamA: string, teamB: string): boolean {
+    return this.mode === "teams" && teamA !== "" && teamA === teamB;
+  }
+
+  /** Enough players for a match: 2+, and in team mode at least one on each side. */
+  private enoughPlayers(): boolean {
+    if (this.playerCount() < MATCH_MIN_PLAYERS) return false;
+    return this.mode !== "teams" || (this.teamSize("blue") > 0 && this.teamSize("red") > 0);
+  }
+
+  /** Stop playing and just watch. Mid-match, your gear drops where you stood. */
+  private makeSpectator(p: Player, sessionId: string) {
+    if (p.alive && this.state.matchPhase === "live") this.dropEverything(p);
+    p.spectator = true;
+    p.alive = false;
+    p.hp = PLAYER_MAX_HP;
+    p.armor = 0;
+    setBoots(p, 0);
+    p.reloading = false;
+    p.place = 0;
+    p.team = "";
+    p.slots.forEach((s) => setSlot(s, ""));
+    this.heldKeys.set(sessionId, { ...NO_INPUT });
+    this.ensureHost();
+  }
+
+  /**
+   * Team mode, at match start: even out the teams (at most one apart), moving whoever
+   * joined last. Those players respawn at their new base with everyone else.
+   */
+  private balanceTeams() {
+    if (this.mode !== "teams") return;
+    for (;;) {
+      const blue = this.teamSize("blue");
+      const red = this.teamSize("red");
+      if (Math.abs(blue - red) <= 1) return;
+      const from: Team = blue > red ? "blue" : "red";
+      let newest: Player | undefined;
+      this.state.players.forEach((p) => {
+        if (!p.spectator && p.team === from && (!newest || p.joinedAt > newest.joinedAt)) newest = p;
+      });
+      if (!newest) return;
+      this.setTeam(newest, otherTeam(from));
+    }
+  }
+
+  /** Keep the lobby's room list up to date (only sends when something changed). */
+  private syncListing() {
+    const s = this.state;
+    const meta = {
+      ...this.metadata,
+      mode: this.mode,
+      players: this.playerCount(),
+      maxPlayers: s.maxPlayers,
+      spectators: this.spectatorCount(),
+      phase: s.matchPhase,
+    };
+    const key = `${meta.players}:${meta.spectators}:${meta.phase}:${meta.hostName}`;
+    if (key === this.listingKey) return;
+    this.listingKey = key;
+    void this.setMetadata(meta);
   }
 
   /**
@@ -250,7 +461,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     const host = s.players.get(s.hostId);
     if (!host || now - host.lastActiveAt < hostIdleMs) return;
     for (const [id, p] of s.players) {
-      if (id !== s.hostId && now - (this.lastInputAt.get(id) ?? -Infinity) < hostIdleMs) {
+      if (id !== s.hostId && !p.spectator && now - (this.lastInputAt.get(id) ?? -Infinity) < hostIdleMs) {
         console.log(`[${this.roomId}] ${host.name} is AFK, ${p.name} is the host now`);
         this.setHost(id);
         return;
@@ -263,16 +474,35 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
   private tick(dtMs: number) {
     const now = this.clock.currentTime;
     this.updateMatch(now);
-    if (this.state.matchPhase === "live") this.updateZone(now);
+    const live = this.state.matchPhase === "live";
+    const teams = this.mode === "teams";
+    if (live) {
+      this.state.matchSeconds = Math.floor((now - this.matchStart) / 1000);
+      if (!teams) this.updateZone(now); // team matches have no shrinking zone
+    }
     const practice = this.state.matchPhase === "warmup" || this.state.matchPhase === "countdown";
 
     this.state.players.forEach((player, sessionId) => {
+      if (player.spectator) return;
       const input = this.heldKeys.get(sessionId) ?? NO_INPUT;
 
       if (!player.alive) {
-        // Respawning only exists in warmup. During a match, dead means out.
-        if (practice && now >= player.respawnAt) this.respawn(player);
+        // Warmup: everyone respawns. Solo match: dead means out. Team match: back at your base.
+        if ((practice || (live && teams)) && now >= player.respawnAt) this.respawn(player);
         return;
+      }
+
+      // Team mode: standing at your own base heals you (the "fountain").
+      if (teams && isTeam(player.team) && player.hp < PLAYER_MAX_HP) {
+        const base = BASES[player.team];
+        if (Math.hypot(player.x - base.x, player.y - base.y) <= FOUNTAIN_RADIUS) {
+          player.healCarry += (FOUNTAIN_HEAL_PER_SEC * dtMs) / 1000;
+          const whole = Math.floor(player.healCarry);
+          if (whole > 0) {
+            player.healCarry -= whole;
+            player.hp = Math.min(PLAYER_MAX_HP, player.hp + whole);
+          }
+        }
       }
 
       const slot = player.slots[player.active];
@@ -320,10 +550,90 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       this.autoPickup(player, sessionId, now);
     });
 
+    if (teams && this.state.matchPhase === "live") this.fireTurrets(now); // warmup is free practice
     this.moveBullets(dtMs, now);
     this.moveGrenades(dtMs, now);
     this.kickIdlePlayers(now);
     if (this.state.matchPhase === "warmup") this.replaceIdleHost(now);
+    this.syncListing();
+  }
+
+  // ---------- Team bases ----------
+
+  /** Both cores back to full health (team mode), or no cores at all (solo). */
+  private resetCores() {
+    const cores = this.state.cores;
+    if (this.mode !== "teams") {
+      cores.clear();
+      return;
+    }
+    for (const team of TEAMS) {
+      const core = cores.get(team) ?? new Core();
+      core.team = team;
+      core.x = BASES[team].x;
+      core.y = BASES[team].y;
+      core.hp = CORE_MAX_HP;
+      core.nextShotAt = 0;
+      if (!cores.has(team)) cores.set(team, core);
+    }
+  }
+
+  /** Each core shoots the closest enemy in range that it can see. */
+  private fireTurrets(now: number) {
+    const gun = gunStats("turret")!;
+    this.state.cores.forEach((core) => {
+      if (core.hp <= 0 || now < core.nextShotAt) return;
+      let target: Player | undefined;
+      let best = TURRET_RANGE;
+      this.state.players.forEach((p) => {
+        if (p.spectator || !p.alive || p.team === core.team) return;
+        const d = Math.hypot(p.x - core.x, p.y - core.y) - PLAYER_RADIUS;
+        if (d <= best && this.clearLine(core.x, core.y, p.x, p.y, CORE_RADIUS + 2)) {
+          best = d;
+          target = p;
+        }
+      });
+      if (!target) return;
+      core.nextShotAt = now + gun.fireMs;
+      const aim = Math.atan2(target.y - core.y, target.x - core.x);
+      const angle = aim + (Math.random() * 2 - 1) * gun.spread;
+      const start = CORE_RADIUS + 6; // from the edge of the tower, not inside it
+      const bullet: Bullet = {
+        id: this.nextBulletId++,
+        owner: `core:${core.team}`,
+        team: core.team,
+        weapon: "turret",
+        damage: gun.damage,
+        speed: gun.bulletSpeed,
+        x: core.x + Math.cos(angle) * start,
+        y: core.y + Math.sin(angle) * start,
+        vx: Math.cos(angle) * gun.bulletSpeed,
+        vy: Math.sin(angle) * gun.bulletSpeed,
+        expiresAt: now + gun.bulletLifeMs,
+      };
+      const shot: ShotEvent = { id: bullet.id, owner: bullet.owner, weapon: "turret", x: bullet.x, y: bullet.y, angle };
+      this.broadcast("shot", shot);
+      this.bullets.push(bullet);
+    });
+  }
+
+  /** The enemy core at (x, y), if a point there is inside one. */
+  private coreAt(x: number, y: number, pad = 1): Core | undefined {
+    for (const core of this.state.cores.values()) {
+      if (Math.hypot(core.x - x, core.y - y) <= CORE_RADIUS + pad) return core;
+    }
+    return undefined;
+  }
+
+  /** Damage a core (enemies only). At 0 the match is over: that team lost. */
+  private hurtCore(core: Core, attackerTeam: string, amount: number, now: number) {
+    if (this.state.matchPhase !== "live" || core.hp <= 0 || attackerTeam === core.team || !attackerTeam) return;
+    core.hp = Math.max(0, core.hp - Math.round(amount));
+    if (core.hp > 0) return;
+    const ev: CoreDestroyedEvent = { team: core.team, x: core.x, y: core.y };
+    this.broadcast("coreDestroyed", ev);
+    console.log(`[${this.roomId}] ${TEAM_NAME[core.team as Team] ?? core.team} base destroyed`);
+    this.endMatch(now, otherTeam(core.team as Team));
   }
 
   private fire(owner: string, player: Player, slot: WeaponSlot, gun: GunStats, now: number) {
@@ -335,6 +645,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     const bullet: Bullet = {
       id: this.nextBulletId++,
       owner,
+      team: player.team,
       weapon: slot.weapon as WeaponId,
       damage: gun.damage,
       speed: gun.bulletSpeed,
@@ -360,7 +671,12 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       if (this.map.pointBlocked(x, y)) {
         const end: BulletEndEvent = { id: bullet.id, x, y, hit: "" };
         this.broadcast("bulletEnd", end);
-        if (bullet.splash) this.explode(freeX, freeY, owner, bullet.weapon, bullet.splash, now);
+        if (bullet.splash) this.explode(freeX, freeY, owner, bullet.weapon, bullet.splash, now, player.team);
+        else {
+          // Point-blank against the enemy core still counts.
+          const core = this.coreAt(x, y);
+          if (core) this.hurtCore(core, player.team, bullet.damage, now);
+        }
         return;
       }
       freeX = x;
@@ -398,12 +714,15 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
         }
 
         if (this.map.pointBlocked(b.x, b.y)) {
-          gone = true; // stopped by cover
+          gone = true; // stopped by cover (or a core: the enemy's takes the hit)
+          const core = b.splash ? undefined : this.coreAt(b.x, b.y);
+          if (core) this.hurtCore(core, b.team, b.damage, now);
           break;
         }
 
         this.state.players.forEach((target, targetId) => {
-          if (gone || targetId === b.owner || !target.alive) return;
+          // Bullets fly through teammates (no friendly fire) and spectators.
+          if (gone || targetId === b.owner || !target.alive || target.spectator || this.sameTeam(b.team, target.team)) return;
           if (Math.hypot(target.x - b.x, target.y - b.y) <= PLAYER_RADIUS) {
             gone = true;
             if (b.splash) return; // the explosion below does the damage
@@ -420,7 +739,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
         this.broadcast("bulletEnd", end);
         if (b.splash) {
           const inWall = this.map.pointBlocked(b.x, b.y) || b.x <= 0 || b.y <= 0 || b.x >= ARENA_SIZE || b.y >= ARENA_SIZE;
-          this.explode(inWall ? freeX : b.x, inWall ? freeY : b.y, b.owner, b.weapon, b.splash, now);
+          this.explode(inWall ? freeX : b.x, inWall ? freeY : b.y, b.owner, b.weapon, b.splash, now, b.team);
         }
       } else {
         survivors.push(b);
@@ -457,7 +776,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     this.state.grenades.forEach((g, id) => {
       if (now >= g.explodesAt) {
         this.state.grenades.delete(id);
-        this.explode(g.x, g.y, g.owner, "grenade", stats.splash!, now);
+        this.explode(g.x, g.y, g.owner, "grenade", stats.splash!, now, this.state.players.get(g.owner)?.team ?? "");
         return;
       }
       const speed = Math.hypot(g.vx, g.vy);
@@ -477,14 +796,20 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     });
   }
 
-  /** Boom: hurts everyone in the radius who isn't behind a wall (less the further away). */
-  private explode(x: number, y: number, owner: string, weapon: WeaponId, splash: SplashStats, now: number) {
+  /**
+   * Boom: hurts everyone in the radius who isn't behind a wall (less the further away).
+   * `team` is the thrower's team: teammates are spared (the thrower isn't), and an enemy
+   * core caught in the blast takes the damage too.
+   */
+  private explode(x: number, y: number, owner: string, weapon: WeaponId, splash: SplashStats, now: number, team = "") {
     const hurtList: { target: Player; id: string; damage: number }[] = [];
+    const falloff = (dist: number) => splash.damage - (splash.damage - splash.minDamage) * (dist / splash.radius);
     this.state.players.forEach((target, id) => {
-      if (!target.alive) return;
+      if (!target.alive || target.spectator) return;
+      if (id !== owner && this.sameTeam(team, target.team)) return;
       const dist = Math.max(0, Math.hypot(target.x - x, target.y - y) - PLAYER_RADIUS);
       if (dist > splash.radius || !this.clearLine(x, y, target.x, target.y)) return;
-      let damage = splash.damage - (splash.damage - splash.minDamage) * (dist / splash.radius);
+      let damage = falloff(dist);
       if (id === owner) damage *= SELF_SPLASH_MUL;
       hurtList.push({ target, id, damage: Math.round(damage) });
     });
@@ -492,13 +817,22 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     const ev: ExplosionEvent = { x, y, radius: splash.radius, owner, weapon, hits: hurtList.map((h) => h.id) };
     this.broadcast("explosion", ev);
     for (const h of hurtList) this.hurt(h.target, h.id, owner, h.damage, now, weapon);
+    this.state.cores.forEach((core) => {
+      const dist = Math.max(0, Math.hypot(core.x - x, core.y - y) - CORE_RADIUS);
+      if (dist <= splash.radius && this.clearLine(x, y, core.x, core.y, 0, CORE_RADIUS + 2)) this.hurtCore(core, team, falloff(dist), now);
+    });
   }
 
-  /** Nothing solid between two points (sampled every few pixels). */
-  private clearLine(x0: number, y0: number, x1: number, y1: number): boolean {
-    const steps = Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 10);
+  /**
+   * Nothing solid between two points (sampled every few pixels). `skipStart` / `skipEnd`
+   * ignore that many pixels at either end (e.g. the core a turret shot starts from).
+   */
+  private clearLine(x0: number, y0: number, x1: number, y1: number, skipStart = 0, skipEnd = 0): boolean {
+    const len = Math.hypot(x1 - x0, y1 - y0);
+    const steps = Math.ceil(len / 10);
     for (let i = 1; i < steps; i++) {
       const t = i / steps;
+      if (t * len < skipStart || (1 - t) * len < skipEnd) continue;
       if (this.map.pointBlocked(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)) return false;
     }
     return true;
@@ -510,7 +844,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     const hits: string[] = [];
 
     this.state.players.forEach((target, targetId) => {
-      if (targetId === owner || !target.alive) return;
+      if (targetId === owner || !target.alive || target.spectator || this.sameTeam(player.team, target.team)) return;
       const dx = target.x - player.x;
       const dy = target.y - player.y;
       const dist = Math.hypot(dx, dy);
@@ -529,6 +863,17 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
     const ev: SwingEvent = { owner, weapon, angle: player.angle, hits };
     this.broadcast("swing", ev);
+
+    // Smacking the enemy core works too (it's big: reach is measured to its edge).
+    this.state.cores.forEach((core) => {
+      const dx = core.x - player.x;
+      const dy = core.y - player.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist - PLAYER_RADIUS - CORE_RADIUS > stats.range) return;
+      const slack = Math.asin(Math.min(1, CORE_RADIUS / Math.max(dist, CORE_RADIUS)));
+      if (Math.abs(angleDelta(player.angle, Math.atan2(dy, dx))) > stats.arc / 2 + slack) return;
+      this.hurtCore(core, player.team, stats.damage, now);
+    });
   }
 
   /**
@@ -549,15 +894,25 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     target.hp = Math.max(0, target.hp - amount);
     if (target.hp > 0) return armored;
 
-    if (this.state.matchPhase === "live") target.place = this.countAlive(); // e.g. 5 left → 5th place
+    const live = this.state.matchPhase === "live";
+    const teams = this.mode === "teams";
+    if (live && !teams) target.place = this.countAlive(); // e.g. 5 left → 5th place
     target.alive = false;
     target.deaths++;
     target.reloading = false;
-    target.respawnAt = now + RESPAWN_MS;
+    target.respawnAt = now + (live && teams ? TEAM_RESPAWN_MS : RESPAWN_MS);
     this.dropEverything(target);
 
     const attacker = this.state.players.get(attackerId);
     if (attacker && attackerId !== targetId) attacker.kills++; // blowing yourself up isn't a kill
+    // Team score: every enemy taken down (by a player or the base turret) counts for the team.
+    if (live && teams) {
+      const killerTeam = attacker?.team ?? (attackerId.startsWith("core:") ? attackerId.slice(5) : "");
+      if (killerTeam && killerTeam !== target.team) {
+        if (killerTeam === "blue") this.state.blueKills++;
+        else if (killerTeam === "red") this.state.redKills++;
+      }
+    }
 
     const kill: KillEvent = { killer: attackerId, victim: targetId, weapon };
     this.broadcast("kill", kill);
@@ -572,9 +927,10 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     player.reloadEndsAt = this.clock.currentTime + gun.reloadMs;
   }
 
-  /** Back in the game: full health, no vest, just the starting pistol. */
+  /** Back in the game: full health, no vest, just the starting pistol. Team mode: at your base. */
   private respawn(player: Player) {
-    const spot = this.map.findFreeSpot(PLAYER_RADIUS, PLAYER_RADIUS * 3, Math.random, this.spawnArea());
+    if (player.spectator) return;
+    const spot = this.map.findFreeSpot(PLAYER_RADIUS, PLAYER_RADIUS * 2, Math.random, this.spawnArea(player));
     player.x = spot.x;
     player.y = spot.y;
     player.hp = PLAYER_MAX_HP;
@@ -829,17 +1185,17 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
 
   private updateMatch(now: number) {
     const s = this.state;
-    const players = s.players.size;
+    const players = this.playerCount();
     s.aliveCount = this.countAlive();
 
     switch (s.matchPhase) {
       case "warmup":
         // Keep the room open until it's full (the host can also start early: "startMatch").
-        if (players >= MATCH_MIN_PLAYERS && players >= this.maxClients) this.startCountdown(now);
+        if (players >= s.maxPlayers && this.enoughPlayers()) this.startCountdown(now);
         break;
 
       case "countdown":
-        if (players < MATCH_MIN_PLAYERS) {
+        if (!this.enoughPlayers()) {
           s.matchPhase = "warmup";
         } else if (now >= this.phaseEndsAt) {
           this.startMatch(now);
@@ -847,7 +1203,14 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
         break;
 
       case "live":
-        if (s.aliveCount <= 1) this.endMatch(now);
+        if (this.mode === "teams") {
+          // A side with nobody left (everyone quit or went to watch) loses.
+          const blue = this.teamSize("blue");
+          const red = this.teamSize("red");
+          if (blue === 0 || red === 0) this.endMatch(now, blue > 0 ? "blue" : red > 0 ? "red" : "");
+        } else if (s.aliveCount <= 1) {
+          this.endMatch(now);
+        }
         break;
 
       case "ended":
@@ -869,13 +1232,18 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     const s = this.state;
     s.matchPhase = "live";
     s.winner = "";
+    s.winnerTeam = "";
+    s.blueKills = 0;
+    s.redKills = 0;
     this.matchStart = now;
     s.matchSeconds = 0;
     this.resetZone();
+    this.resetCores();
+    this.balanceTeams();
     this.bullets = [];
     this.state.grenades.clear();
     this.newMap(); // a brand-new random map for every match
-    this.spawnLoot(s.players.size); // and fresh loot (placed once; nothing respawns during the match)
+    this.spawnLoot(this.playerCount()); // and fresh loot (placed once; nothing respawns during the match)
     // Everyone starts equal
     s.players.forEach((p) => {
       p.kills = 0;
@@ -884,52 +1252,63 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       this.respawn(p);
     });
     s.aliveCount = this.countAlive();
-    void this.lock(); // nobody joins a match in progress
-    console.log(`[${this.roomId}] match started with ${s.players.size} players`);
+    // (No lock: new players are turned away in onAuth, but spectators can still come and watch.)
+    const teams = this.mode === "teams" ? ` (blue ${this.teamSize("blue")} vs red ${this.teamSize("red")})` : "";
+    console.log(`[${this.roomId}] match started with ${this.playerCount()} players${teams}`);
   }
 
-  private endMatch(now: number) {
+  /** `winnerTeam`: team mode only (the team whose enemy core fell, or who still has players). */
+  private endMatch(now: number, winnerTeam: Team | "" = "") {
     const s = this.state;
     let winnerId = "";
-    s.players.forEach((p, id) => {
-      if (p.alive) {
-        winnerId = id;
-        p.place = 1;
-      }
-    });
+    if (this.mode === "teams") {
+      s.winnerTeam = winnerTeam;
+      s.players.forEach((p) => {
+        if (!p.spectator) p.place = winnerTeam && p.team === winnerTeam ? 1 : 2;
+      });
+    } else {
+      s.players.forEach((p, id) => {
+        if (p.alive && !p.spectator) {
+          winnerId = id;
+          p.place = 1;
+        }
+      });
+    }
     s.winner = winnerId;
     s.matchPhase = "ended";
     this.phaseEndsAt = now + MATCH_END_MS;
     this.bullets = [];
     this.state.grenades.clear();
-    console.log(`[${this.roomId}] match over, winner: ${s.players.get(winnerId)?.name ?? "nobody"}`);
+    const who = this.mode === "teams" ? (winnerTeam ? `${TEAM_NAME[winnerTeam]} team` : "nobody") : (s.players.get(winnerId)?.name ?? "nobody");
+    console.log(`[${this.roomId}] match over, winner: ${who}`);
   }
 
   private backToWarmup() {
     const s = this.state;
     s.matchPhase = "warmup";
     s.winner = "";
+    s.winnerTeam = "";
     s.matchSeconds = 0;
     this.resetZone();
+    this.resetCores();
     s.players.forEach((p) => {
       p.place = 0;
       this.respawn(p);
     });
-    void this.unlock();
   }
 
   /** Generate a random map and tell clients (they rebuild it from the same seed). */
   private newMap() {
     const seed = newMapSeed();
-    this.map = new GameMap(seed);
+    this.map = new GameMap(seed, this.mode);
     this.state.mapSeed = seed;
-    console.log(`[${this.roomId ?? "new room"}] map ${seed}: ${this.map.blockThemes.join(", ")}`);
+    console.log(`[${this.roomId ?? "new room"}] ${this.mode} map ${seed}: ${this.map.blockThemes.join(", ")}`);
   }
 
   private countAlive(): number {
     let n = 0;
     this.state.players.forEach((p) => {
-      if (p.alive) n++;
+      if (p.alive && !p.spectator) n++;
     });
     return n;
   }
@@ -1022,8 +1401,13 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     return x < z.x || y < z.y || x > z.x + z.size || y > z.y + z.size;
   }
 
-  /** Where players respawn: inside the next safe square once one is announced. */
-  private spawnArea() {
+  /** Where players respawn: their team's base, or (solo) inside the next safe square once one is announced. */
+  private spawnArea(player: Player) {
+    if (this.mode === "teams" && isTeam(player.team)) {
+      const b = BASES[player.team];
+      const r = BASE_CLEAR_RADIUS * 0.8; // the square inside the cleared circle
+      return { x: b.x - r, y: b.y - r, w: r * 2, h: r * 2 };
+    }
     const z = this.state.zone;
     if (z.phase === "waiting") return { x: 0, y: 0, w: ARENA_SIZE, h: ARENA_SIZE };
     return { x: z.nextX, y: z.nextY, w: z.nextSize, h: z.nextSize };

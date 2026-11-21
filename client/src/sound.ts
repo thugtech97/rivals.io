@@ -15,6 +15,7 @@ const GUN_VOICES: Record<string, { crack: number; body: number; thump: number; d
   mg: { crack: 2200, body: 2200, thump: 120, decay: 0.1, vol: 0.85, reach: 1.05 },
   sniper: { crack: 1800, body: 1800, thump: 80, decay: 0.32, vol: 1.25, reach: 1.6 },
   bazooka: { crack: 900, body: 1400, thump: 70, decay: 0.4, vol: 1.1, reach: 1.4 },
+  turret: { crack: 4200, body: 3600, thump: 240, decay: 0.07, vol: 0.7, reach: 1.1 }, // team base gun: a sharp zap
 };
 
 export class Sfx {

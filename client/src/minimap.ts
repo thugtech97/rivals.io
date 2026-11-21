@@ -1,6 +1,7 @@
 import { ARENA_SIZE } from "../../shared/constants";
 
-// A small square in the corner that shows only where YOU are in the arena.
+// A small square in the corner that shows where YOU are in the arena. In team mode it also
+// shows your teammates and both bases; spectators see everyone.
 
 export class Minimap {
   private ctx: CanvasRenderingContext2D;
@@ -24,13 +25,28 @@ export class Minimap {
    * Draw a frame. `me` is your position and aim (null while dead);
    * `zone` is the safe square and where it shrinks to next (null before it appears).
    */
-  update(me: { x: number; y: number; angle: number; color: number } | null, zone: MinimapZone | null, timeMs: number) {
+  update(
+    me: { x: number; y: number; angle: number; color: number } | null,
+    zone: MinimapZone | null,
+    timeMs: number,
+    extra: MinimapExtras = {},
+  ) {
     this.resize();
     const ctx = this.ctx;
     const px = this.sizePx;
     const dpr = window.devicePixelRatio || 1;
     ctx.clearRect(0, 0, px, px);
     if (zone) this.drawZone(zone);
+    for (const b of extra.bases ?? []) this.drawBase(b);
+    for (const o of extra.others ?? []) {
+      ctx.beginPath();
+      ctx.arc((o.x / ARENA_SIZE) * px, (o.y / ARENA_SIZE) * px, 3 * dpr, 0, Math.PI * 2);
+      ctx.fillStyle = o.color;
+      ctx.fill();
+      ctx.strokeStyle = "rgba(11,13,18,0.9)";
+      ctx.lineWidth = 1 * dpr;
+      ctx.stroke();
+    }
     if (!me) return;
 
     const x = (me.x / ARENA_SIZE) * px;
@@ -60,6 +76,26 @@ export class Minimap {
     ctx.strokeStyle = "#ffffff";
     ctx.lineWidth = 1.5 * dpr;
     ctx.stroke();
+  }
+
+  /** A team base: a square in its color, with a health bar under it (dimmed once destroyed). */
+  private drawBase(b: MinimapBase) {
+    const ctx = this.ctx;
+    const dpr = window.devicePixelRatio || 1;
+    const x = (b.x / ARENA_SIZE) * this.sizePx;
+    const y = (b.y / ARENA_SIZE) * this.sizePx;
+    const r = 6 * dpr;
+    ctx.globalAlpha = b.hp > 0 ? 1 : 0.35;
+    ctx.fillStyle = b.color;
+    ctx.fillRect(x - r, y - r, r * 2, r * 2);
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.strokeRect(x - r, y - r, r * 2, r * 2);
+    ctx.fillStyle = "rgba(11,13,18,0.85)";
+    ctx.fillRect(x - r, y + r + 2 * dpr, r * 2, 3 * dpr);
+    ctx.fillStyle = b.color;
+    ctx.fillRect(x - r, y + r + 2 * dpr, r * 2 * Math.max(0, Math.min(1, b.hp)), 3 * dpr);
+    ctx.globalAlpha = 1;
   }
 
   /** Red danger area outside the safe square, its red edge, and the next square in white. */
@@ -100,4 +136,19 @@ export interface MinimapZone {
   size: number;
   /** Where it will shrink to next (omit once it's final). */
   next?: { x: number; y: number; size: number };
+}
+
+/** Team mode extras (and, for spectators, everyone on the map). */
+export interface MinimapExtras {
+  /** Other soldiers to show as small dots (CSS colors). */
+  others?: { x: number; y: number; color: string }[];
+  bases?: MinimapBase[];
+}
+
+export interface MinimapBase {
+  x: number;
+  y: number;
+  color: string;
+  /** Health left, 0-1. */
+  hp: number;
 }

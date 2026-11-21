@@ -1,4 +1,5 @@
 import { ARENA_SIZE } from "./constants";
+import { BASE_CLEAR_RADIUS, BASES, CORE_RADIUS, TEAMS, type GameMode } from "./teams";
 
 // The arena layout, generated from a seed. The server picks a new seed every match and
 // syncs it; every client runs generateMap(seed) and gets exactly the same map, so
@@ -38,7 +39,7 @@ export type RectStyle =
   | "concrete"
   | "stall";
 
-export type CircleStyle = "tree" | "rock" | "barrel" | "fountain" | "silo" | "statue";
+export type CircleStyle = "tree" | "rock" | "barrel" | "fountain" | "silo" | "statue" | "core";
 
 /** Decorative ground areas (no collision). */
 export type GroundKind = "field" | "concrete" | "gravel" | "paving";
@@ -315,7 +316,11 @@ export class GameMap {
   readonly obstacles: Obstacle[] = [];
   readonly grounds: GroundArea[] = [];
 
-  constructor(readonly seed: number) {
+  /** `mode` "teams" clears both team bases and puts a solid core in each (see shared/teams.ts). */
+  constructor(
+    readonly seed: number,
+    readonly mode: GameMode = "solo",
+  ) {
     const rng = seededRandom(seed);
 
     // 1. Shuffle the themes into the 9 blocks.
@@ -353,6 +358,16 @@ export class GameMap {
       const fields = this.grounds.filter((g) => g.kind === "field" && inside(g.x + 1, g.y + 1, area));
       this.scatterTrees({ x: area.x + 40, y: area.y + 40, w: BLOCK_SIZE - 80, h: BLOCK_SIZE - 80 }, theme.trees, fields, rng);
     }
+
+    // 5. Team mode: open ground around each base, with the team's core in the middle.
+    if (mode === "teams") this.placeBases();
+  }
+
+  private placeBases() {
+    const kept = this.obstacles.filter((o) => TEAMS.every((t) => distanceTo(o, BASES[t].x, BASES[t].y) > BASE_CLEAR_RADIUS));
+    this.obstacles.length = 0;
+    this.obstacles.push(...kept);
+    for (const t of TEAMS) this.obstacles.push({ kind: "circle", style: "core", x: BASES[t].x, y: BASES[t].y, r: CORE_RADIUS });
   }
 
   private placeStreetCover(rng: () => number) {

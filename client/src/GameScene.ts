@@ -3,7 +3,20 @@ import { Callbacks, type Room } from "@colyseus/sdk";
 import { ARENA_SIZE, MATCH_MIN_PLAYERS, PICKUP_RADIUS, PLAYER_MAX_HP, PLAYER_RADIUS, RESPAWN_MS } from "../../shared/constants";
 import { sfx } from "./sound";
 import { angleDelta, applyInput, isMoving, muzzlePosition, NO_INPUT, type InputState } from "../../shared/movement";
-import type { BulletEndEvent, ExplosionEvent, KillEvent, ShotEvent, SwingEvent } from "../../shared/messages";
+import type { BulletEndEvent, CoreDestroyedEvent, ExplosionEvent, KillEvent, ShotEvent, SwingEvent } from "../../shared/messages";
+import {
+  CORE_MAX_HP,
+  CORE_RADIUS,
+  FOUNTAIN_RADIUS,
+  isTeam,
+  otherTeam,
+  TEAM_COLOR,
+  TEAM_CSS,
+  TEAM_NAME,
+  TEAM_RESPAWN_MS,
+  TURRET_RANGE,
+  type GameMode,
+} from "../../shared/teams";
 import {
   createSoldier,
   drawHealthBar,
@@ -16,6 +29,7 @@ import {
   type SoldierView,
 } from "./soldier";
 import type { Hud, SlotInfo } from "./hud";
+import type { MinimapExtras } from "./minimap";
 import { renderMap, type RenderedMap } from "./mapRender";
 import { bakeShape } from "./atlas";
 import { cycleQuality, onQualityChange, particleCount, qualitySettings } from "./quality";
@@ -55,6 +69,10 @@ interface PlayerData {
   kills: number;
   deaths: number;
   place: number;
+  /** Team mode: "blue" | "red". */
+  team: string;
+  /** Only watching. */
+  spectator: boolean;
   active: number;
   reloading: boolean;
   slots: ArrayLike<SlotData> & { at?: (i: number) => SlotData | undefined };
@@ -82,6 +100,29 @@ interface ZoneData {
   nextSize: number;
 }
 
+interface CoreData {
+  team: string;
+  x: number;
+  y: number;
+  hp: number;
+}
+
+/** A team base: the ground pad (fountain + turret range), the tower, its health bar and name. */
+interface CoreView {
+  data: CoreData;
+  pad: Phaser.GameObjects.Graphics;
+  tower: Phaser.GameObjects.Container;
+  flash: Phaser.GameObjects.Arc;
+  glow: Phaser.GameObjects.Arc;
+  hpBar: Phaser.GameObjects.Graphics;
+  label: Phaser.GameObjects.Text;
+  lastHp: number;
+  /** Hit sparks / sounds are throttled (a machine gun hits it 13×/s). */
+  nextHitFxAt: number;
+  /** When it last took damage ("Your base is under attack!"). */
+  lastHitAt: number;
+}
+
 interface PlayerView {
   soldier: SoldierView;
   data: PlayerData;
@@ -97,6 +138,8 @@ interface PlayerView {
   stepY: number;
   /** Countdown to the next speed-boots trail puff. */
   trailInMs: number;
+  /** Healing sparkles are throttled (the base fountain heals a little every update). */
+  nextHealFxAt: number;
 }
 
 interface BulletView {
@@ -125,7 +168,8 @@ const TRACER_MAX_OFFSET_PX = 80;
 export interface GameSceneData {
   room: Room;
   hud: Hud;
-  onPlayerCount?: (count: number) => void;
+  /** People playing, and people watching. */
+  onPlayerCount?: (players: number, spectators: number) => void;
   onRoomName?: (name: string) => void;
   /** Called when M toggles sound (true = muted). */
   onMuteToggle?: (muted: boolean) => void;
@@ -155,7 +199,7 @@ function slotOf(d: PlayerData, i: number): SlotData {
 export class GameScene extends Phaser.Scene {
   private room!: Room;
   private hud!: Hud;
-  private onPlayerCount?: (count: number) => void;
+  private onPlayerCount?: (players: number, spectators: number) => void;
   private onRoomName?: (name: string) => void;
   private onMuteToggle?: (muted: boolean) => void;
   private touch?: TouchControls;
@@ -163,6 +207,8 @@ export class GameScene extends Phaser.Scene {
   private ready = false;
 
   private views = new Map<string, PlayerView>();
+  /** Team mode: the two bases. */
+  private cores = new Map<string, CoreView>();
   private bullets = new Map<number, BulletView>();
   private items = new Map<string, { obj: Phaser.GameObjects.Container; data: ItemData; glow: Phaser.GameObjects.Image; phase: number }>();
   /** Thrown grenades (synced positions) and their blinking fuse light. */
@@ -219,6 +265,7 @@ export class GameScene extends Phaser.Scene {
     this.lastBeep = -1;
     this.lastPhase = "";
     this.views.clear();
+    this.cores.clear();
     this.map = undefined;
     this.rendered = { objects: [], textures: [] };
     this.killedBy = "";
@@ -261,6 +308,14 @@ export class GameScene extends Phaser.Scene {
     }
     this.hud.onSlotTap = (i) => this.selectSlot(i);
     this.hud.onStartMatch = () => this.room.send("startMatch");
+    this.hud.onSwitchTeam = () => {
+      const team = this.views.get(this.room.sessionId)?.data.team;
+      if (isTeam(team)) this.room.send("team", otherTeam(team));
+    };
+    this.hud.onToggleSpectate = () => {
+      const me = this.views.get(this.room.sessionId)?.data;
+      if (me) this.room.send("spectate", !me.spectator);
+    };
     kb.on("keydown-G", () => this.room.send("drop"));
     kb.on("keydown-E", () => this.room.send("pickup"));
     (["ONE", "TWO", "THREE", "FOUR", "FIVE"] as const)
@@ -312,15 +367,16 @@ export class GameScene extends Phaser.Scene {
     // A new random map every match: rebuild it from the server's seed.
     $.listen("mapSeed", (seed: number) => this.loadMap(seed));
 
-    $.onAdd("players", (player, key) => {
-      this.addPlayer(key as string, player as unknown as PlayerData);
-      this.onPlayerCount?.(this.views.size);
-    });
+    $.onAdd("players", (player, key) => this.addPlayer(key as string, player as unknown as PlayerData));
     $.onRemove("players", (_player, key) => {
       this.views.get(key as string)?.soldier.root.destroy();
       this.views.delete(key as string);
-      this.onPlayerCount?.(this.views.size);
     });
+
+    // Team mode: the two bases.
+    $.onAdd("cores", (core, key) => this.addCore(key as string, core as unknown as CoreData));
+    $.onRemove("cores", (_core, key) => this.removeCore(key as string));
+    this.room.onMessage("coreDestroyed", (ev: CoreDestroyedEvent) => this.coreDestroyedEffect(ev));
 
     $.onAdd("items", (item, key) => this.addItem(key as string, item as unknown as ItemData));
     $.onRemove("items", (_item, key) => this.removeItem(key as string));
@@ -335,7 +391,13 @@ export class GameScene extends Phaser.Scene {
     this.room.onMessage("bulletEnd", (end: BulletEndEvent) => this.endBullet(end));
     this.room.onMessage("swing", (ev: SwingEvent) => this.swingEffect(ev));
     this.room.onMessage("kill", (kill: KillEvent) => {
-      const killer = kill.killer === "" ? "Zone" : (this.views.get(kill.killer)?.data.name ?? "Someone");
+      const baseTeam = kill.killer.startsWith("core:") ? kill.killer.slice(5) : "";
+      const killer =
+        kill.killer === ""
+          ? "Zone"
+          : isTeam(baseTeam)
+            ? `${TEAM_NAME[baseTeam]} base`
+            : (this.views.get(kill.killer)?.data.name ?? "Someone");
       const victim = this.views.get(kill.victim)?.data.name ?? "Someone";
       const weapon = kill.weapon === "zone" ? "" : WEAPONS[kill.weapon as WeaponId]?.name ?? "";
       this.hud.addKill(killer, victim, weapon);
@@ -351,7 +413,7 @@ export class GameScene extends Phaser.Scene {
   update(time: number, delta: number) {
     // Safety net: build the map if its seed arrived before we started listening.
     const seed = Number(this.room.state.mapSeed ?? 0);
-    if (seed && this.map?.seed !== seed) this.loadMap(seed);
+    if (seed && (this.map?.seed !== seed || this.map.mode !== this.mode)) this.loadMap(seed, this.map?.mode !== this.mode);
 
     const mine = this.views.get(this.room.sessionId);
     this.readInput(time, mine);
@@ -360,6 +422,8 @@ export class GameScene extends Phaser.Scene {
     const remoteSmoothing = 1 - Math.pow(REMOTE_LAG_LEFT_PER_SEC, delta / 1000);
 
     this.views.forEach((view, sessionId) => {
+      // Switched team (new uniform color): redraw the soldier in the new color.
+      if (view.data.color !== view.soldier.color) this.recolorSoldier(sessionId, view);
       const { soldier, data } = view;
       const isMe = sessionId === this.room.sessionId;
       const heldId = slotOf(data, data.active).weapon;
@@ -385,16 +449,17 @@ export class GameScene extends Phaser.Scene {
             this.hud.hurtFlash();
             sfx.hurt();
           }
-        } else if (data.hp > view.lastHp && data.alive && view.wasAlive) {
+        } else if (data.hp > view.lastHp && data.alive && view.wasAlive && time >= view.nextHealFxAt) {
           this.healEffect(soldier.root.x, soldier.root.y);
+          view.nextHealFxAt = time + 700;
         }
         drawHealthBar(soldier.hpBar, data.hp, data.armor);
         view.lastHp = data.hp;
         view.lastArmor = data.armor;
       }
 
-      // Just died: leave a mark on the floor.
-      if (!data.alive && view.wasAlive) {
+      // Just died: leave a mark on the floor. (Going off to spectate isn't dying.)
+      if (!data.alive && view.wasAlive && !data.spectator) {
         this.deathEffect(soldier.root.x, soldier.root.y, data.color);
         sfx.death(soldier.root.x, soldier.root.y);
         if (isMe) this.diedAt = time;
@@ -442,6 +507,7 @@ export class GameScene extends Phaser.Scene {
     });
 
     this.updateBullets(this.time.now, delta);
+    this.updateCores(this.time.now);
     this.updateGrenades(smoothing);
     this.drawZone(smoothing);
     this.updateCamera(mine);
@@ -517,7 +583,12 @@ export class GameScene extends Phaser.Scene {
     }
     if (phase !== this.lastPhase) {
       if (phase === "live" && this.lastPhase === "countdown") sfx.countdownBeep(true);
-      if (phase === "ended") (st.winner === this.room.sessionId ? sfx.win() : sfx.lose());
+      if (phase === "ended") {
+        const me = this.views.get(this.room.sessionId)?.data;
+        const won = this.mode === "teams" ? !!this.myTeam && st.winnerTeam === this.myTeam : st.winner === this.room.sessionId;
+        if (won) sfx.win();
+        else if (me && !me.spectator) sfx.lose();
+      }
       if (phase !== "countdown") this.lastBeep = -1;
       this.lastPhase = phase;
     }
@@ -548,7 +619,8 @@ export class GameScene extends Phaser.Scene {
     if (!seed || (this.map?.seed === seed && !force)) return;
     for (const o of this.rendered.objects) o.destroy();
     for (const key of this.rendered.textures) if (this.textures.exists(key)) this.textures.remove(key);
-    if (this.map?.seed !== seed) this.map = new GameMap(seed);
+    // Team mode maps have open ground and a core at each base (same as the server's).
+    if (this.map?.seed !== seed || this.map.mode !== this.mode) this.map = new GameMap(seed, this.mode);
     this.rendered = renderMap(this, this.map!, qualitySettings().mapResolution);
     this.tryReady();
   }
@@ -564,15 +636,39 @@ export class GameScene extends Phaser.Scene {
     return this.room.state.hostId === this.room.sessionId;
   }
 
-  /** Out of the current match (dead during "live"/"ended"): watching others. */
+  private get mode(): GameMode {
+    return this.room.state.mode === "teams" ? "teams" : "solo";
+  }
+
+  /** My team ("" in solo mode or while spectating). */
+  private get myTeam(): string {
+    const me = this.views.get(this.room.sessionId)?.data;
+    return me && !me.spectator ? me.team : "";
+  }
+
+  /**
+   * Watching others: a spectator, or (solo) out of the current match. In a team match the
+   * dead just wait to respawn at their base.
+   */
   private get isSpectator(): boolean {
-    const mine = this.views.get(this.room.sessionId);
-    return !!mine && !mine.data.alive && (this.phase === "live" || this.phase === "ended");
+    const d = this.views.get(this.room.sessionId)?.data;
+    if (!d) return false;
+    if (d.spectator) return true;
+    return this.mode === "solo" && !d.alive && (this.phase === "live" || this.phase === "ended");
   }
 
   /** Alive players, in a stable order, for cycling through while spectating. */
   private alivePlayers(): string[] {
-    return [...this.views].filter(([, v]) => v.data.alive).map(([id]) => id).sort();
+    return [...this.views].filter(([, v]) => v.data.alive && !v.data.spectator).map(([id]) => id).sort();
+  }
+
+  /** How many are playing / watching. */
+  private counts(): { players: number; spectators: number } {
+    let spectators = 0;
+    this.views.forEach((v) => {
+      if (v.data.spectator) spectators++;
+    });
+    return { players: this.views.size - spectators, spectators };
   }
 
   /** Spectator: switch to the next (+1) or previous (-1) player still alive. */
@@ -596,6 +692,15 @@ export class GameScene extends Phaser.Scene {
     } else {
       this.spectating = "";
     }
+    // A spectator with nobody to watch: look at the middle of the map.
+    if (target === this.room.sessionId && mine?.data.spectator) {
+      if (this.cameraTarget !== "center") {
+        this.cameras.main.stopFollow();
+        this.cameras.main.pan(ARENA_SIZE / 2, ARENA_SIZE / 2, 600, "Sine.easeInOut");
+        this.cameraTarget = "center";
+      }
+      return;
+    }
     if (!mine && !this.views.has(target)) return;
     if (target !== this.cameraTarget) {
       const view = this.views.get(target);
@@ -610,6 +715,140 @@ export class GameScene extends Phaser.Scene {
     const base = this.baseZoom();
     const want = sniper ? Math.min(base, SNIPER_ZOOM) * (base < CAMERA_ZOOM ? 0.85 : 1) : base;
     if (Math.abs(cam.zoom - want) > 0.001) cam.setZoom(cam.zoom + (want - cam.zoom) * 0.12);
+  }
+
+  // ---------- Team bases ----------
+
+  private addCore(team: string, data: CoreData) {
+    const color = isTeam(team) ? TEAM_COLOR[team] : 0xffffff;
+    // On the ground: the turret's reach (faint dashes), the fountain, and a paved pad.
+    const pad = this.add.graphics().setDepth(1);
+    pad.lineStyle(2, color, 0.22);
+    const dashes = 48;
+    for (let i = 0; i < dashes; i++) {
+      const a0 = (i / dashes) * Math.PI * 2;
+      pad.beginPath();
+      pad.arc(data.x, data.y, TURRET_RANGE, a0, a0 + (Math.PI / dashes) * 1.1);
+      pad.strokePath();
+    }
+    pad.fillStyle(color, 0.1);
+    pad.fillCircle(data.x, data.y, FOUNTAIN_RADIUS);
+    pad.lineStyle(3, color, 0.55);
+    pad.strokeCircle(data.x, data.y, FOUNTAIN_RADIUS);
+    pad.fillStyle(0x5b606b, 1);
+    pad.fillCircle(data.x, data.y, CORE_RADIUS + 22);
+    pad.lineStyle(3, 0x3a3e47, 1);
+    pad.strokeCircle(data.x, data.y, CORE_RADIUS + 22);
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      pad.lineStyle(2, 0x494d57, 1);
+      pad.lineBetween(
+        data.x + Math.cos(a) * (CORE_RADIUS + 4),
+        data.y + Math.sin(a) * (CORE_RADIUS + 4),
+        data.x + Math.cos(a) * (CORE_RADIUS + 22),
+        data.y + Math.sin(a) * (CORE_RADIUS + 22),
+      );
+    }
+
+    // The tower: a team-colored crystal in an armored ring, with a pulsing glow.
+    const glow = this.add.circle(0, 0, CORE_RADIUS + 10, color, 0.25);
+    const shadow = this.add.circle(5, 6, CORE_RADIUS, 0x000000, 0.35);
+    const ring = this.add.circle(0, 0, CORE_RADIUS, 0x2a2e36, 1).setStrokeStyle(3, 0x15171c, 1);
+    const pts: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2 + Math.PI / 6;
+      pts.push(Math.cos(a) * (CORE_RADIUS - 8), Math.sin(a) * (CORE_RADIUS - 8));
+    }
+    const crystal = this.add.polygon(0, 0, pts, color, 1).setStrokeStyle(2, 0xffffff, 0.6);
+    const shine = this.add.circle(-6, -7, 7, 0xffffff, 0.45);
+    const flash = this.add.circle(0, 0, CORE_RADIUS, 0xffffff, 1).setAlpha(0);
+    const tower = this.add.container(data.x, data.y, [glow, shadow, ring, crystal, shine, flash]).setDepth(12);
+    this.tweens.add({ targets: glow, scale: 1.25, alpha: 0.1, duration: 1100, yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
+
+    const hpBar = this.add.graphics().setDepth(41);
+    const name = isTeam(team) ? `${TEAM_NAME[team].toUpperCase()} BASE` : "BASE";
+    const label = this.add
+      .text(data.x, data.y - CORE_RADIUS - 34, name, {
+        fontFamily: "system-ui, sans-serif",
+        fontSize: "13px",
+        fontStyle: "bold",
+        color: isTeam(team) ? TEAM_CSS[team] : "#ffffff",
+        stroke: "#0b0d12",
+        strokeThickness: 4,
+      })
+      .setOrigin(0.5, 1)
+      .setDepth(41);
+
+    const view: CoreView = { data, pad, tower, flash, glow, hpBar, label, lastHp: -1, nextHitFxAt: 0, lastHitAt: -Infinity };
+    this.cores.set(team, view);
+    this.drawCoreHp(view);
+  }
+
+  private removeCore(team: string) {
+    const c = this.cores.get(team);
+    if (!c) return;
+    c.pad.destroy();
+    c.tower.destroy();
+    c.hpBar.destroy();
+    c.label.destroy();
+    this.cores.delete(team);
+  }
+
+  private drawCoreHp(c: CoreView) {
+    const g = c.hpBar;
+    const w = 90;
+    const x = c.data.x - w / 2;
+    const y = c.data.y - CORE_RADIUS - 28;
+    const pct = Math.max(0, c.data.hp / CORE_MAX_HP);
+    g.clear();
+    g.fillStyle(0x0b0d12, 0.85);
+    g.fillRoundedRect(x - 2, y - 2, w + 4, 11, 3);
+    g.fillStyle(isTeam(c.data.team) ? TEAM_COLOR[c.data.team] : 0xffffff, 1);
+    if (pct > 0) g.fillRoundedRect(x, y, Math.max(2, w * pct), 7, 2);
+    c.lastHp = c.data.hp;
+  }
+
+  /** Health bar, a flash and sparks when hit, a dead tower once destroyed. */
+  private updateCores(time: number) {
+    this.cores.forEach((c) => {
+      if (c.data.hp === c.lastHp) return;
+      const hurt = c.lastHp >= 0 && c.data.hp < c.lastHp;
+      const healed = c.data.hp > c.lastHp; // new match: back to full
+      this.drawCoreHp(c);
+      c.tower.setAlpha(c.data.hp > 0 ? 1 : 0.35);
+      c.glow.setVisible(c.data.hp > 0);
+      if (healed) c.lastHitAt = -Infinity;
+      if (!hurt) return;
+      c.lastHitAt = time;
+      if (time < c.nextHitFxAt) return;
+      c.nextHitFxAt = time + 120;
+      this.tweens.killTweensOf(c.flash);
+      c.flash.setAlpha(0.6);
+      this.tweens.add({ targets: c.flash, alpha: 0, duration: 160 });
+      this.impactEffect(c.data.x + (Math.random() - 0.5) * CORE_RADIUS, c.data.y + (Math.random() - 0.5) * CORE_RADIUS);
+      sfx.armorHit(c.data.x, c.data.y);
+    });
+  }
+
+  /** A base going down: a huge blast and a long shake. */
+  private coreDestroyedEffect(ev: CoreDestroyedEvent) {
+    this.explosionEffect({ x: ev.x, y: ev.y, radius: 220, owner: "", weapon: "bazooka", hits: [] });
+    this.time.delayedCall(180, () => this.explosionEffect({ x: ev.x + 30, y: ev.y - 20, radius: 160, owner: "", weapon: "bazooka", hits: [] }));
+    this.cameras.main.shake(700, 0.012);
+  }
+
+  /** A player changed team: draw their soldier again in the new uniform color. */
+  private recolorSoldier(sessionId: string, view: PlayerView) {
+    const isMe = sessionId === this.room.sessionId;
+    const old = view.soldier;
+    const d = view.data;
+    const s = createSoldier(this, old.root.x, old.root.y, d.color, isMe ? `${d.name} (you)` : d.name, isMe);
+    s.body.rotation = old.body.rotation;
+    s.root.setVisible(old.root.visible);
+    drawHealthBar(s.hpBar, d.hp, d.armor);
+    if (this.cameraTarget === sessionId) this.cameras.main.startFollow(s.root, true, 0.12, 0.12);
+    old.root.destroy();
+    view.soldier = s;
   }
 
   // ---------- Safe zone ----------
@@ -663,10 +902,13 @@ export class GameScene extends Phaser.Scene {
   /** The line at the top of the screen: match state, clock, zone, players alive. */
   private zoneText(): { text: string; urgent: boolean } {
     const st = this.room.state;
+    const teams = this.mode === "teams";
     switch (this.phase) {
       case "warmup": {
-        const count = `Waiting for players… (${this.views.size}/${Number(st.maxPlayers) || MATCH_MIN_PLAYERS})`;
-        if (this.views.size < MATCH_MIN_PLAYERS) return { text: `${count} · warm up!`, urgent: false };
+        const { players } = this.counts();
+        const count = `Waiting for players… (${players}/${Number(st.maxPlayers) || MATCH_MIN_PLAYERS})`;
+        if (players < MATCH_MIN_PLAYERS) return { text: `${count} · warm up!`, urgent: false };
+        if (teams && !this.bothTeamsHavePlayers()) return { text: `${count} · each team needs a player`, urgent: false };
         if (this.isHost) return { text: `${count} · starts when full, or start it now`, urgent: false };
         return { text: `${count} · starts when full or when the host starts it`, urgent: false };
       }
@@ -678,6 +920,12 @@ export class GameScene extends Phaser.Scene {
 
     const z = this.zone;
     const clock = formatTime(Number(st.matchSeconds ?? 0));
+    if (teams) {
+      // Your base under attack? Say so.
+      const mine = this.cores.get(this.myTeam);
+      if (mine && this.time.now - mine.lastHitAt < 2500) return { text: `⏱ ${clock}  ·  ⚠ Your base is under attack!`, urgent: true };
+      return { text: `⏱ ${clock}  ·  Destroy the enemy base!`, urgent: false };
+    }
     const alive = `👥 ${st.aliveCount} alive`;
     const left = formatTime(z?.secondsLeft ?? 0);
     switch (z?.phase) {
@@ -738,8 +986,20 @@ export class GameScene extends Phaser.Scene {
     // Match clock, zone countdown, and the "you're outside" warning.
     const info = this.zoneText();
     this.hud.setZoneInfo(info.text, info.urgent);
-    const canStart = this.isHost && this.phase === "warmup" && this.views.size >= MATCH_MIN_PLAYERS;
-    this.hud.setStartButton(canStart ? `▶ Start match now (${this.views.size} players)` : null);
+    this.hud.setRoomActions(this.roomActions(mine));
+    this.hud.setSpectatorView(!!mine?.data.spectator);
+    this.onPlayerCountChanged();
+    this.hud.setTeamScore(
+      this.mode === "teams"
+        ? {
+            blueKills: Number(this.room.state.blueKills ?? 0),
+            redKills: Number(this.room.state.redKills ?? 0),
+            blueCore: this.cores.get("blue")?.data.hp ?? CORE_MAX_HP,
+            redCore: this.cores.get("red")?.data.hp ?? CORE_MAX_HP,
+            myTeam: this.myTeam,
+          }
+        : null,
+    );
     const z = this.zone;
     const s = this.zoneShown;
     const outside =
@@ -755,6 +1015,7 @@ export class GameScene extends Phaser.Scene {
       alive ? { x: this.me.x, y: this.me.y, angle: this.myInput.angle, color: mine!.data.color } : null,
       s ? { ...s, next: shrinking ? { x: z.nextX, y: z.nextY, size: z.nextSize } : undefined } : null,
       time,
+      this.minimapExtras(),
     );
 
     if (mine) {
@@ -784,8 +1045,19 @@ export class GameScene extends Phaser.Scene {
       this.touch?.setPickupHint(!!prompt);
 
       const by = this.killedBy ? `Eliminated by ${this.killedBy}` : "Eliminated";
-      if (d.alive || this.phase === "ended") {
+      const switchHint = isTouchMode() ? "tap the screen to switch" : "click / Space / ← → to switch";
+      if (d.spectator) {
+        // Just watching: who, and how to switch.
+        const watching = this.views.get(this.spectating)?.data;
+        const n = this.alivePlayers().length;
+        const side = watching && isTeam(watching.team) ? ` (${TEAM_NAME[watching.team]})` : "";
+        const who = watching ? `Watching ${watching.name}${side}` : "Nobody to watch yet";
+        this.hud.setDead(this.phase !== "ended", who, n > 1 ? switchHint : "", "👁 Spectating");
+      } else if (d.alive || this.phase === "ended") {
         this.hud.setDead(false);
+      } else if (this.phase === "live" && this.mode === "teams") {
+        const secs = Math.max(1, Math.ceil((TEAM_RESPAWN_MS - (time - this.diedAt)) / 1000));
+        this.hud.setDead(true, `${by} · back at your base in ${secs}…`);
       } else if (this.phase === "live") {
         // Out of the match: show the placement and who we're watching.
         const watching = this.views.get(this.spectating)?.data.name;
@@ -804,7 +1076,16 @@ export class GameScene extends Phaser.Scene {
     }
 
     // Winner banner
-    if (this.phase === "ended") {
+    if (this.phase === "ended" && this.mode === "teams") {
+      const st = this.room.state;
+      const next = `Next match in ${st.phaseSecondsLeft}s`;
+      const win = String(st.winnerTeam);
+      const score = `${st.blueKills ?? 0} – ${st.redKills ?? 0} kills`;
+      if (!isTeam(win)) this.hud.setBanner("Draw", `Nobody left on either side · ${next}`, false);
+      else if (!this.myTeam) this.hud.setBanner(`🏆 ${TEAM_NAME[win]} team wins!`, `${score} · ${next}`, true);
+      else if (win === this.myTeam) this.hud.setBanner("🏆 Victory!", `The ${TEAM_NAME[otherTeam(win)]} base is destroyed · ${next}`, true);
+      else this.hud.setBanner("Defeat", `Your base was destroyed · ${score} · ${next}`, false);
+    } else if (this.phase === "ended") {
       const st = this.room.state;
       const winner = this.views.get(String(st.winner));
       const next = `Next match in ${st.phaseSecondsLeft}s`;
@@ -819,15 +1100,80 @@ export class GameScene extends Phaser.Scene {
     if (this.scoreboardTimer <= 0) {
       this.scoreboardTimer = 250;
       const inMatch = this.phase === "live" || this.phase === "ended";
+      const teams = this.mode === "teams";
       const rows = [...this.views].map(([id, v]) => ({
         name: id === this.room.state.hostId ? `👑 ${v.data.name}` : v.data.name,
         kills: v.data.kills,
         deaths: v.data.deaths,
         isMe: id === this.room.sessionId,
-        out: inMatch && !v.data.alive,
+        // Out of a solo match for good. (In a team match the dead are just respawning.)
+        out: !teams && inMatch && !v.data.alive && !v.data.spectator,
+        team: teams && !v.data.spectator ? v.data.team : undefined,
+        spectator: v.data.spectator,
       }));
       this.hud.setScoreboard(rows);
     }
+  }
+
+  /** Warmup buttons: start (host), switch team (team mode), and spectate / play. */
+  private roomActions(mine?: PlayerView) {
+    const d = mine?.data;
+    const before = this.phase === "warmup" || this.phase === "countdown";
+    const { players } = this.counts();
+    const max = Number(this.room.state.maxPlayers) || 0;
+    const canStart =
+      this.isHost && this.phase === "warmup" && players >= MATCH_MIN_PLAYERS && (this.mode !== "teams" || this.bothTeamsHavePlayers());
+    let team: string | null = null;
+    if (d && !d.spectator && this.mode === "teams" && before && isTeam(d.team)) {
+      const other = otherTeam(d.team);
+      if (this.teamCount(other) < Math.ceil(max / 2)) team = `⇄ Join ${TEAM_NAME[other]}`;
+    }
+    let spectate: string | null = null;
+    if (d?.spectator) spectate = before && players < max ? "🎮 Play" : null;
+    else if (d && before) spectate = "👁 Spectate";
+    return { start: canStart ? `▶ Start match now (${players} players)` : null, team, spectate };
+  }
+
+  private teamCount(team: string): number {
+    let n = 0;
+    this.views.forEach((v) => {
+      if (!v.data.spectator && v.data.team === team) n++;
+    });
+    return n;
+  }
+
+  private bothTeamsHavePlayers(): boolean {
+    return this.teamCount("blue") > 0 && this.teamCount("red") > 0;
+  }
+
+  /** Tell main.ts (room card) how many are playing / watching, when it changes. */
+  private lastCounts = "";
+  private onPlayerCountChanged() {
+    const { players, spectators } = this.counts();
+    const key = `${players}:${spectators}`;
+    if (key === this.lastCounts) return;
+    this.lastCounts = key;
+    this.onPlayerCount?.(players, spectators);
+  }
+
+  /** Team mode: bases and your teammates. Spectators see everyone. */
+  private minimapExtras(): MinimapExtras {
+    const spectator = !!this.views.get(this.room.sessionId)?.data.spectator;
+    if (this.mode !== "teams" && !spectator) return {};
+    const others: { x: number; y: number; color: string }[] = [];
+    this.views.forEach((v, id) => {
+      if (id === this.room.sessionId || !v.data.alive || v.data.spectator) return;
+      if (!spectator && v.data.team !== this.myTeam) return; // enemies stay hidden
+      const color = isTeam(v.data.team) ? TEAM_CSS[v.data.team] : `#${v.data.color.toString(16).padStart(6, "0")}`;
+      others.push({ x: v.soldier.root.x, y: v.soldier.root.y, color });
+    });
+    const bases = [...this.cores.values()].map((c) => ({
+      x: c.data.x,
+      y: c.data.y,
+      color: isTeam(c.data.team) ? TEAM_CSS[c.data.team] : "#ffffff",
+      hp: c.data.hp / CORE_MAX_HP,
+    }));
+    return { others, bases };
   }
 
   /** "E: swap …" hint when standing on something that needs E. */
@@ -865,6 +1211,7 @@ export class GameScene extends Phaser.Scene {
       stepX: data.x,
       stepY: data.y,
       trailInMs: 0,
+      nextHealFxAt: 0,
     });
 
     if (isMe) {
@@ -916,14 +1263,18 @@ export class GameScene extends Phaser.Scene {
     const vy = Math.sin(shot.angle) * gun.bulletSpeed;
 
     // Tracer: long and white for the sniper, thin for the machine gun, a fat rocket for the bazooka
+    // A base turret's bolt glows in its team's color.
+    const turretTeam = shot.owner.startsWith("core:") ? shot.owner.slice(5) : "";
     const look =
-      shot.weapon === "sniper"
-        ? { len: 34, w: 3, c: 0xffffff }
-        : shot.weapon === "mg"
-          ? { len: 14, w: 2, c: 0xffd27a }
-          : shot.weapon === "bazooka"
-            ? { len: 18, w: 7, c: 0x55603a }
-            : { len: 16, w: 3, c: 0xffe08a };
+      shot.weapon === "turret"
+        ? { len: 24, w: 5, c: isTeam(turretTeam) ? TEAM_COLOR[turretTeam] : 0xffffff }
+        : shot.weapon === "sniper"
+          ? { len: 34, w: 3, c: 0xffffff }
+          : shot.weapon === "mg"
+            ? { len: 14, w: 2, c: 0xffd27a }
+            : shot.weapon === "bazooka"
+              ? { len: 18, w: 7, c: 0x55603a }
+              : { len: 16, w: 3, c: 0xffe08a };
     // The server fired from where IT thinks the shooter is, but on screen we draw ourselves
     // ahead (prediction) and others behind (smoothing). Start the tracer and flash at the gun
     // tip as drawn, then let the tracer slide onto the real path (hits are still server-side).

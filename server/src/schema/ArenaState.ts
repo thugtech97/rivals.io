@@ -1,6 +1,7 @@
 import { Schema, MapSchema, ArraySchema, type } from "@colyseus/schema";
 import { PLAYER_MAX_HP } from "../../../shared/constants";
 import { SLOT_COUNT } from "../../../shared/weapons";
+import { CORE_MAX_HP } from "../../../shared/teams";
 
 /** One inventory slot. weapon "" = empty (you fight with your fists). */
 export class WeaponSlot extends Schema {
@@ -27,6 +28,10 @@ export class Player extends Schema {
   @type("number") deaths = 0;
   /** Finishing place in the current match (1 = winner, 0 = still playing / not ranked). */
   @type("number") place = 0;
+  /** Team mode: "blue" | "red". Solo mode: "". */
+  @type("string") team = "";
+  /** Only watching: never spawns, can't be hit, doesn't count as a player. */
+  @type("boolean") spectator = false;
 
   /** Bulletproof vest points (0 = no vest). */
   @type("number") armor = 0;
@@ -47,6 +52,21 @@ export class Player extends Schema {
   lastActiveAt = 0;
   /** Speed boots: ms of running left (`boots` is this as a rounded-up %). */
   bootsMs = 0;
+  /** Fountain healing builds up here until it's a whole HP. */
+  healCarry = 0;
+  /** When this player joined (team balancing moves the newest players first). */
+  joinedAt = 0;
+}
+
+/** Team mode: a team's base core. Destroy the enemy's to win. */
+export class Core extends Schema {
+  @type("string") team = "";
+  @type("number") x = 0;
+  @type("number") y = 0;
+  @type("number") hp = CORE_MAX_HP;
+
+  // Server-only
+  nextShotAt = 0;
 }
 
 /**
@@ -126,8 +146,15 @@ export class ArenaState extends Schema {
   @type("string") matchPhase = "warmup";
   /** Whole seconds left in the countdown / winner banner. */
   @type("number") phaseSecondsLeft = 0;
-  /** sessionId of the last player alive ("" if nobody survived). */
+  /** "solo" (last soldier standing) or "teams" (Blue vs Red, destroy the enemy base). Fixed per room. */
+  @type("string") mode = "solo";
+  /** sessionId of the last player alive ("" if nobody survived). Solo mode. */
   @type("string") winner = "";
+  /** Team mode: the team that won ("blue" | "red", "" = nobody). */
+  @type("string") winnerTeam = "";
+  /** Team mode: kills scored by each team this match. */
+  @type("number") blueKills = 0;
+  @type("number") redKills = 0;
   @type("number") aliveCount = 0;
   /** Seconds since the match went live. */
   @type("number") matchSeconds = 0;
@@ -136,4 +163,6 @@ export class ArenaState extends Schema {
   @type({ map: Player }) players = new MapSchema<Player>();
   @type({ map: GroundItem }) items = new MapSchema<GroundItem>();
   @type({ map: Grenade }) grenades = new MapSchema<Grenade>();
+  /** Team mode: keyed by team ("blue" / "red"). Empty in solo mode. */
+  @type({ map: Core }) cores = new MapSchema<Core>();
 }

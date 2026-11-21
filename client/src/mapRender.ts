@@ -44,7 +44,7 @@ export function renderMap(scene: Phaser.Scene, map: GameMap, resolution: number)
   drawShadows(g, map);
   for (const o of map.obstacles) {
     if (o.kind === "rect") drawRect(g, o, rng);
-    else if (o.style !== "tree") drawRound(g, o);
+    else if (o.style !== "tree" && o.style !== "core") drawRound(g, o); // cores: drawn live by GameScene
   }
 
   // Bake into a grid of tiles: one texture for the whole map would exceed the
@@ -271,6 +271,8 @@ function drawShadows(g: G, map: GameMap) {
     if (o.kind === "rect") {
       const off = o.style === "building" ? 10 : 5;
       g.fillRect(o.x + off, o.y + off, o.w, o.h);
+    } else if (o.style === "core") {
+      continue;
     } else if (o.style === "tree") {
       g.fillCircle(o.x + 10, o.y + 12, o.r + 14);
     } else {

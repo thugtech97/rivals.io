@@ -17,5 +17,16 @@ export interface RoomListing {
   clients: number;
   maxClients: number;
   locked?: boolean;
-  metadata?: { roomName: string; hostName: string };
+  metadata?: {
+    roomName: string;
+    hostName: string;
+    /** "solo" | "teams" */
+    mode?: string;
+    /** Playing seats taken / available (spectators have extra seats of their own). */
+    players?: number;
+    maxPlayers?: number;
+    spectators?: number;
+    /** "warmup" | "countdown" | "live" | "ended" */
+    phase?: string;
+  };
 }

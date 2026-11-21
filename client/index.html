@@ -57,11 +57,20 @@
                 </span>
               </label>
               <div class="field">
+                <span>Mode</span>
+                <div class="segmented segmented-2" role="radiogroup" aria-label="Mode">
+                  <label><input type="radio" name="mode" value="solo" checked /><span>🏆 Solo</span></label>
+                  <label><input type="radio" name="mode" value="teams" /><span>⚔️ Teams</span></label>
+                </div>
+                <small id="mode-note" class="field-note">Last soldier standing. The zone closes in.</small>
+              </div>
+              <div class="field">
                 <span>Max players</span>
                 <div class="segmented" role="radiogroup" aria-label="Max players">
                   <label><input type="radio" name="max-players" value="2" /><span>2</span></label>
                   <label><input type="radio" name="max-players" value="4" /><span>4</span></label>
                   <label><input type="radio" name="max-players" value="8" checked /><span>8</span></label>
+                  <label><input type="radio" name="max-players" value="10" /><span>10</span></label>
                   <label><input type="radio" name="max-players" value="16" /><span>16</span></label>
                 </div>
               </div>
@@ -87,6 +96,8 @@
         <span><kbd>E</kbd> loot</span>
         <span>🔫 9 weapons · 💥 bazooka &amp; grenades · 🛡️ vests · 👟 speed boots · ➕ medkits</span>
         <span>🟥 stay out of the red zone</span>
+        <span>⚔️ Teams: destroy the enemy base</span>
+        <span>👁 Watch any room</span>
       </footer>
     </main>
 
@@ -168,8 +179,27 @@
       <div id="hurt-flash" class="vignette hurt-flash"></div>
       <canvas id="minimap" class="minimap"></canvas>
 
-      <div id="zone-info" class="zone-info"></div>
-      <button id="start-match" class="btn btn-primary btn-small start-match" hidden></button>
+      <!-- Top center, stacked: match info, team score (team mode), warmup buttons -->
+      <div class="top-center">
+        <div id="zone-info" class="zone-info"></div>
+        <!-- Team mode: kills per team and each base's health -->
+        <div id="team-score" class="team-score" hidden>
+          <div class="team-side blue">
+            <div class="team-line"><span class="team-name">Blue</span><span id="blue-kills" class="team-kills">0</span></div>
+            <div class="core-bar" title="Blue base health"><div id="blue-core" class="core-fill"></div></div>
+          </div>
+          <span class="team-vs">⚔</span>
+          <div class="team-side red">
+            <div class="team-line"><span id="red-kills" class="team-kills">0</span><span class="team-name">Red</span></div>
+            <div class="core-bar" title="Red base health"><div id="red-core" class="core-fill"></div></div>
+          </div>
+        </div>
+        <div class="room-actions">
+          <button id="start-match" class="btn btn-primary btn-small" hidden></button>
+          <button id="switch-team" class="btn btn-small" hidden></button>
+          <button id="toggle-spectate" class="btn btn-small" hidden></button>
+        </div>
+      </div>
       <div id="zone-warning" class="zone-warning" hidden>⚠ Outside the safe zone: −10 HP every second!</div>
 
       <div class="panel health">
@@ -214,7 +244,7 @@
       </div>
 
       <div id="death" class="death" hidden>
-        <div class="death-title">You died</div>
+        <div id="death-title" class="death-title">You died</div>
         <div id="death-text"></div>
         <div id="spectating" class="spectating" hidden></div>
       </div>

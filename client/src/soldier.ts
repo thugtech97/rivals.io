@@ -194,8 +194,8 @@ function drawHands(g: G, right: [number, number], left: [number, number]) {
   g.fillCircle(left[0], left[1], 3.6);
 }
 
-/** Where each weapon is held: [right hand, left hand]. */
-const GRIP: Record<WeaponId, [[number, number], [number, number]]> = {
+/** Where each weapon is held: [right hand, left hand]. (The base turret's gun is never held.) */
+const GRIP: Partial<Record<WeaponId, [[number, number], [number, number]]>> & { fists: [[number, number], [number, number]] } = {
   pistol: [[15, 7], [17, 1]],
   rifle: [[10, 9], [22, 5]],
   mg: [[10, 11], [26, 6]],

@@ -35,7 +35,7 @@ export interface SwingEvent {
 
 /** "kill": someone got eliminated. */
 export interface KillEvent {
-  killer: string; // sessionId ("" = the zone)
+  killer: string; // sessionId ("" = the zone, "core:blue" / "core:red" = that team's base turret)
   victim: string; // sessionId
   weapon: WeaponId | "zone";
 }
@@ -49,4 +49,11 @@ export interface ExplosionEvent {
   weapon: WeaponId;
   /** sessionIds of everyone it hurt (the owner too, if they were in it). */
   hits: string[];
+}
+
+/** "coreDestroyed": a team's base core went down (team mode). The match ends right after. */
+export interface CoreDestroyedEvent {
+  team: string;
+  x: number;
+  y: number;
 }

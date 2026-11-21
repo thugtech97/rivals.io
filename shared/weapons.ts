@@ -1,7 +1,8 @@
 // Every weapon's stats, shared by server (rules) and client (HUD, visuals, sounds).
 // Tweak numbers here to balance the game.
 
-export type GunId = "pistol" | "rifle" | "mg" | "sniper" | "bazooka" | "grenade";
+/** "turret" is the team base's built-in gun (team mode): never dropped, never in anyone's hands. */
+export type GunId = "pistol" | "rifle" | "mg" | "sniper" | "bazooka" | "grenade" | "turret";
 export type MeleeId = "knife" | "sword" | "axe" | "fists";
 export type WeaponId = GunId | MeleeId;
 
@@ -87,6 +88,11 @@ export const WEAPONS: Record<WeaponId, WeaponStats> = {
     kind: "gun", name: "Grenade", damage: 85, fireMs: 650, mag: 1, lootReserve: 1, maxReserve: 3, boxAmmo: 0,
     reloadMs: 250, bulletSpeed: 760, bulletLifeMs: 1600, spread: 0.04, moveMul: 1, muzzle: 20,
     splash: { radius: 130, damage: 85, minDamage: 20 }, thrown: true,
+  },
+  // Team bases shoot enemies with this (see shared/teams.ts). Reaches a bit further than a rifle.
+  turret: {
+    kind: "gun", name: "Turret", damage: 10, fireMs: 500, mag: 1, lootReserve: 0, maxReserve: 0, boxAmmo: 0,
+    reloadMs: 0, bulletSpeed: 1300, bulletLifeMs: 520, spread: 0.03, moveMul: 1, muzzle: 0,
   },
   knife: { kind: "melee", name: "Knife", damage: 30, range: 26, arc: 1.4, swingMs: 350, moveMul: 1.05 },
   sword: { kind: "melee", name: "Sword", damage: 45, range: 48, arc: 2.2, swingMs: 650, moveMul: 1 },

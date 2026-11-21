@@ -8,6 +8,7 @@ import { startLobbyBackdrop, stopLobbyBackdrop } from "./lobbyBackdrop";
 import { TouchControls } from "./touchControls";
 import { cycleQuality, getQuality, onQualityChange, QUALITY_LABEL, type Quality } from "./quality";
 import { ARENA_ROOM, IDLE_KICK_CODE, LOBBY_ROOM } from "../../shared/constants";
+import { MAX_SPECTATORS } from "../../shared/teams";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -20,6 +21,7 @@ const ui = {
   roomList: $<HTMLUListElement>("room-list"),
   createForm: $<HTMLFormElement>("create-form"),
   roomName: $<HTMLInputElement>("room-name"),
+  modeNote: $("mode-note"),
   error: $("lobby-error"),
   hud: $("hud"),
   hudRoom: $("hud-room"),
@@ -248,9 +250,11 @@ function renderRooms() {
   }
 
   for (const room of rooms) {
-    const isFull = room.clients >= room.maxClients;
-    // Locked but not full = a match is being played right now.
-    const state = isFull ? "full" : room.locked ? "ingame" : "open";
+    const state = roomState(room);
+    const m = room.metadata;
+    const teams = m?.mode === "teams";
+    const players = m?.players ?? room.clients;
+    const maxPlayers = m?.maxPlayers ?? room.maxClients;
     const li = document.createElement("li");
     li.className = "room";
 
@@ -261,7 +265,11 @@ function renderRooms() {
     name.textContent = room.metadata?.roomName ?? room.roomId;
     const host = document.createElement("div");
     host.className = "room-host";
-    host.textContent = `Host: ${room.metadata?.hostName ?? "?"}`;
+    const mode = document.createElement("span");
+    mode.className = `mode-tag ${teams ? "mode-teams" : "mode-solo"}`;
+    const side = Math.ceil(maxPlayers / 2);
+    mode.textContent = teams ? `⚔️ Teams ${side}v${side}` : "🏆 Solo";
+    host.append(mode, ` Host: ${m?.hostName ?? "?"}`);
     info.append(name, host);
 
     // Player count, a little fill bar, and an Open / In game / Full badge
@@ -269,11 +277,11 @@ function renderRooms() {
     meta.className = "room-meta";
     const count = document.createElement("span");
     count.className = "room-count";
-    count.textContent = `👥 ${room.clients}/${room.maxClients}`;
+    count.textContent = `👥 ${players}/${maxPlayers}` + (m?.spectators ? ` · 👁 ${m.spectators}` : "");
     const fill = document.createElement("div");
     fill.className = "room-fill";
     const bar = document.createElement("span");
-    bar.style.width = `${Math.min(100, (room.clients / room.maxClients) * 100)}%`;
+    bar.style.width = `${Math.min(100, (players / Math.max(1, maxPlayers)) * 100)}%`;
     fill.append(bar);
     const badge = document.createElement("span");
     badge.className = `badge badge-${state}`;
@@ -290,18 +298,67 @@ function renderRooms() {
         text: `Joining ${room.metadata?.roomName ?? "room"}…`,
       });
 
-    li.append(info, meta, join);
+    // Watch: always possible (even mid-match) while there are spectator seats.
+    const watch = document.createElement("button");
+    watch.className = "btn btn-small btn-watch";
+    watch.textContent = "👁 Watch";
+    watch.title = "Spectate this room";
+    watch.disabled = (m?.spectators ?? 0) >= MAX_SPECTATORS;
+    watch.onclick = () =>
+      enterGame(() => client.joinById(room.roomId, { playerName: playerName(), spectate: true }), {
+        button: watch,
+        text: `Watching ${room.metadata?.roomName ?? "room"}…`,
+      });
+
+    const buttons = document.createElement("div");
+    buttons.className = "room-buttons";
+    buttons.append(join, watch);
+    li.append(info, meta, buttons);
     ui.roomList.append(li);
   }
 }
 
 // ---------- Creating / joining a game room ----------
 
-ui.quickPlay.onclick = () =>
-  enterGame(() => client.joinOrCreate(ARENA_ROOM, { playerName: playerName() }), {
-    button: ui.quickPlay,
-    text: "Finding a match…",
-  });
+/**
+ * Open = you can play in it now. Rooms are never locked (so spectators can always get in):
+ * a room that's mid-match or has no playing seats left shows as "In game" / "Full".
+ */
+function roomState(room: RoomListing): "open" | "ingame" | "full" {
+  const m = room.metadata;
+  const phase = m?.phase ?? (room.locked ? "live" : "warmup");
+  if (phase === "live" || phase === "ended") return "ingame";
+  const full = m?.players !== undefined && m.maxPlayers !== undefined ? m.players >= m.maxPlayers : room.clients >= room.maxClients;
+  return full ? "full" : "open";
+}
+
+/** Quick play: the fullest open room (it starts sooner), else a fresh one of our own. */
+async function quickPlay(): Promise<Room> {
+  const name = playerName();
+  const open = rooms
+    .filter((r) => roomState(r) === "open")
+    .sort((a, b) => (b.metadata?.players ?? b.clients) - (a.metadata?.players ?? a.clients));
+  for (const room of open) {
+    try {
+      return await client.joinById(room.roomId, { playerName: name });
+    } catch {
+      // Filled up or started a moment ago: try the next one.
+    }
+  }
+  return client.create(ARENA_ROOM, { playerName: name });
+}
+
+ui.quickPlay.onclick = () => enterGame(quickPlay, { button: ui.quickPlay, text: "Finding a match…" });
+
+// Mode picker: explain what each one is.
+const MODE_NOTES: Record<string, string> = {
+  solo: "Last soldier standing. The zone closes in.",
+  teams: "Blue vs Red. Respawn at your base, destroy the enemy's core to win.",
+};
+const selectedMode = () => document.querySelector<HTMLInputElement>('input[name="mode"]:checked')?.value ?? "solo";
+for (const radio of document.querySelectorAll<HTMLInputElement>('input[name="mode"]')) {
+  radio.onchange = () => (ui.modeNote.textContent = MODE_NOTES[selectedMode()] ?? "");
+}
 
 ui.createForm.onsubmit = (e) => {
   e.preventDefault();
@@ -311,6 +368,7 @@ ui.createForm.onsubmit = (e) => {
         playerName: playerName(),
         roomName: ui.roomName.value.trim(),
         maxPlayers: Number(document.querySelector<HTMLInputElement>('input[name="max-players"]:checked')?.value ?? 8),
+        mode: selectedMode(),
       }),
     { button: ui.createForm.querySelector<HTMLButtonElement>("button[type=submit]")!, text: "Creating your room…" },
   );
@@ -364,7 +422,8 @@ async function enterGame(connect: () => Promise<Room>, loading: { button: HTMLBu
     room: gameRoom,
     hud,
     onRoomName: (name) => (ui.hudRoom.textContent = name),
-    onPlayerCount: (n) => (ui.hudPlayers.textContent = `${n} player${n === 1 ? "" : "s"}`),
+    onPlayerCount: (n, watching) =>
+      (ui.hudPlayers.textContent = `${n} player${n === 1 ? "" : "s"}` + (watching ? ` · 👁 ${watching} watching` : "")),
     onMuteToggle: showMute,
     touch,
     onReady: hideLoader,

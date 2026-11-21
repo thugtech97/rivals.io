@@ -1,6 +1,7 @@
 import { PLAYER_MAX_HP } from "../../shared/constants";
 import { VEST_ARMOR } from "../../shared/weapons";
 import { Minimap } from "./minimap";
+import { CORE_MAX_HP } from "../../shared/teams";
 
 /** One weapon slot as shown in the HUD. */
 export interface SlotInfo {
@@ -21,6 +22,27 @@ export interface ScoreRow {
   isMe: boolean;
   /** Eliminated from the current match (shown faded). */
   out: boolean;
+  /** Team mode: "blue" | "red" (rows are grouped by team). */
+  team?: string;
+  /** Only watching (listed last, without a score). */
+  spectator?: boolean;
+}
+
+/** Team mode: the score strip at the top (kills per team and each base's health). */
+export interface TeamScore {
+  blueKills: number;
+  redKills: number;
+  blueCore: number;
+  redCore: number;
+  /** Your team ("" while spectating): its side gets highlighted. */
+  myTeam: string;
+}
+
+/** The buttons under the match info. null = hidden. */
+export interface RoomActions {
+  start: string | null;
+  team: string | null;
+  spectate: string | null;
 }
 
 export class Hud {
@@ -54,12 +76,24 @@ export class Hud {
     slots: $("weapon-slots"),
     prompt: $("pickup-prompt"),
     startMatch: $("start-match") as HTMLButtonElement,
+    switchTeam: $("switch-team") as HTMLButtonElement,
+    toggleSpectate: $("toggle-spectate") as HTMLButtonElement,
+    deathTitle: $("death-title"),
+    teamScore: $("team-score"),
+    blueKills: $("blue-kills"),
+    redKills: $("red-kills"),
+    blueCore: $("blue-core"),
+    redCore: $("red-core"),
   };
   private last: Record<string, string> = {};
   /** Touch screens: tapping a weapon slot selects it. */
   onSlotTap?: (index: number) => void;
   /** The host pressed "Start match". */
   onStartMatch?: () => void;
+  /** Team mode: "Switch to Red / Blue". */
+  onSwitchTeam?: () => void;
+  /** "Spectate" / "Play". */
+  onToggleSpectate?: () => void;
 
   constructor() {
     this.el.slots.addEventListener("pointerdown", (e) => {
@@ -68,9 +102,18 @@ export class Hud {
       e.preventDefault();
       this.onSlotTap([...this.el.slots.children].indexOf(li));
     });
+    // .blur(): so Space / Enter don't press the button again
     this.el.startMatch.onclick = () => {
-      this.el.startMatch.blur(); // so Space / Enter don't press it again
+      this.el.startMatch.blur();
       this.onStartMatch?.();
+    };
+    this.el.switchTeam.onclick = () => {
+      this.el.switchTeam.blur();
+      this.onSwitchTeam?.();
+    };
+    this.el.toggleSpectate.onclick = () => {
+      this.el.toggleSpectate.blur();
+      this.onToggleSpectate?.();
     };
   }
   readonly minimap = new Minimap($("minimap") as HTMLCanvasElement);
@@ -89,6 +132,10 @@ export class Hud {
     this.el.hurtFlash.classList.remove("show");
     this.el.banner.hidden = true;
     this.el.startMatch.hidden = true;
+    this.el.switchTeam.hidden = true;
+    this.el.toggleSpectate.hidden = true;
+    this.el.teamScore.hidden = true;
+    this.el.root.classList.remove("spectator-view");
     this.el.prompt.hidden = true;
   }
 
@@ -178,9 +225,17 @@ export class Hud {
   }
 
   setScoreboard(rows: ScoreRow[]) {
-    // Still in the match first, then by kills.
-    rows.sort((a, b) => Number(a.out) - Number(b.out) || b.kills - a.kills || a.deaths - b.deaths);
-    const key = rows.map((r) => `${r.name}:${r.kills}:${r.deaths}:${r.isMe}:${r.out}`).join("|");
+    // Team mode: Blue, then Red. Then still in the match first, then by kills. Spectators last.
+    const group = (r: ScoreRow) => (r.spectator ? 3 : r.team === "blue" ? 0 : r.team === "red" ? 1 : 2);
+    rows.sort(
+      (a, b) =>
+        group(a) - group(b) ||
+        Number(a.out) - Number(b.out) ||
+        b.kills - a.kills ||
+        a.deaths - b.deaths ||
+        a.name.localeCompare(b.name),
+    );
+    const key = rows.map((r) => `${r.name}:${r.kills}:${r.deaths}:${r.isMe}:${r.out}:${r.team}:${r.spectator}`).join("|");
     if (!this.changed("score", key)) return;
 
     this.el.score.replaceChildren(
@@ -188,15 +243,48 @@ export class Hud {
         const li = document.createElement("li");
         li.classList.toggle("me", r.isMe);
         li.classList.toggle("out", r.out);
+        li.classList.toggle("spectator", !!r.spectator);
+        if (r.team) li.dataset.team = r.team;
         const name = document.createElement("span");
-        name.textContent = r.name;
+        name.textContent = r.spectator ? `👁 ${r.name}` : r.name;
         const kd = document.createElement("span");
         kd.className = "kd";
-        kd.textContent = `${r.kills} / ${r.deaths}`;
+        kd.textContent = r.spectator ? "watching" : `${r.kills} / ${r.deaths}`;
         li.append(name, kd);
         return li;
       }),
     );
+  }
+
+  /** Team mode score strip (null hides it, e.g. in solo mode). */
+  setTeamScore(score: TeamScore | null) {
+    const key = score ? `${score.blueKills}:${score.redKills}:${score.blueCore}:${score.redCore}:${score.myTeam}` : "none";
+    if (!this.changed("teamScore", key)) return;
+    this.el.teamScore.hidden = !score;
+    if (!score) return;
+    this.el.blueKills.textContent = String(score.blueKills);
+    this.el.redKills.textContent = String(score.redKills);
+    this.el.blueCore.style.width = `${Math.max(0, (score.blueCore / CORE_MAX_HP) * 100)}%`;
+    this.el.redCore.style.width = `${Math.max(0, (score.redCore / CORE_MAX_HP) * 100)}%`;
+    this.el.teamScore.dataset.mine = score.myTeam;
+  }
+
+  /** Start match / switch team / spectate-or-play buttons. */
+  setRoomActions(a: RoomActions) {
+    if (!this.changed("actions", `${a.start}:${a.team}:${a.spectate}`)) return;
+    const set = (btn: HTMLButtonElement, label: string | null) => {
+      btn.hidden = label === null;
+      btn.textContent = label ?? "";
+    };
+    set(this.el.startMatch, a.start);
+    set(this.el.switchTeam, a.team);
+    set(this.el.toggleSpectate, a.spectate);
+  }
+
+  /** Spectators don't need health, ammo or weapon slots. */
+  setSpectatorView(on: boolean) {
+    if (!this.changed("spectatorView", on)) return;
+    this.el.root.classList.toggle("spectator-view", on);
   }
 
   addKill(killer: string, victim: string, weapon = "") {
@@ -219,13 +307,6 @@ export class Hud {
     if (!this.changed("zoneInfo", `${text}:${urgent}`)) return;
     this.el.zoneInfo.textContent = text;
     this.el.zoneInfo.dataset.urgent = String(urgent);
-  }
-
-  /** The host's "Start match" button (null hides it). */
-  setStartButton(label: string | null) {
-    if (!this.changed("startMatch", label)) return;
-    this.el.startMatch.hidden = label === null;
-    this.el.startMatch.textContent = label ?? "";
   }
 
   /** Big center banner (match winner). Pass null to hide it. */
@@ -256,10 +337,12 @@ export class Hud {
     this.el.zoneWarning.hidden = !outside;
   }
 
-  /** "You died" panel. `spectating` is an extra line shown while watching other players. */
-  setDead(dead: boolean, message = "", spectating = "") {
-    if (!this.changed("dead", `${dead}:${message}:${spectating}`)) return;
+  /** "You died" panel (or with another `title`, the spectator panel). `spectating` is an extra line. */
+  setDead(dead: boolean, message = "", spectating = "", title = "You died") {
+    if (!this.changed("dead", `${dead}:${message}:${spectating}:${title}`)) return;
     this.el.death.hidden = !dead;
+    this.el.deathTitle.textContent = title;
+    this.el.death.classList.toggle("watching", title !== "You died");
     this.el.deathText.textContent = message;
     this.el.spectating.textContent = spectating;
     this.el.spectating.hidden = !spectating;
