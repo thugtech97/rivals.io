@@ -27,6 +27,9 @@ export interface ScoreRow {
   spectator?: boolean;
 }
 
+/** One part of the top status line: the same text everywhere, or [full, short for small screens]. */
+export type ZonePart = string | [full: string, short: string];
+
 /** Team mode: the score strip at the top (kills per team and each base's health). */
 export interface TeamScore {
   blueKills: number;
@@ -302,10 +305,30 @@ export class Hud {
     setTimeout(() => li.remove(), 5000);
   }
 
-  /** Match clock + zone countdown, e.g. "02:13 · Zone appears in 0:47". */
-  setZoneInfo(text: string, urgent: boolean) {
-    if (!this.changed("zoneInfo", `${text}:${urgent}`)) return;
-    this.el.zoneInfo.textContent = text;
+  /**
+   * Match clock + zone countdown, e.g. "⏱ 2:13 · 👥 5 alive · Zone shrinks in 0:47". Each part
+   * stays on one line (the line breaks between parts) and has a short form for small screens.
+   */
+  setZoneInfo(parts: ZonePart[], urgent: boolean) {
+    if (!this.changed("zoneInfo", `${JSON.stringify(parts)}:${urgent}`)) return;
+    this.el.zoneInfo.replaceChildren(
+      ...parts.map((part) => {
+        const [full, short] = typeof part === "string" ? [part, part] : part;
+        const el = document.createElement("span");
+        el.className = "zone-part";
+        const f = document.createElement("span");
+        f.className = "full";
+        f.textContent = full;
+        el.append(f);
+        if (short !== full) {
+          const s = document.createElement("span");
+          s.className = "short";
+          s.textContent = short;
+          el.append(s);
+        }
+        return el;
+      }),
+    );
     this.el.zoneInfo.dataset.urgent = String(urgent);
   }
 

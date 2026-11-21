@@ -36,7 +36,7 @@ import {
   setSoldierWeapon,
   type SoldierView,
 } from "./soldier";
-import type { Hud, SlotInfo } from "./hud";
+import type { Hud, SlotInfo, ZonePart } from "./hud";
 import type { MinimapExtras } from "./minimap";
 import { renderMap, type RenderedMap } from "./mapRender";
 import { bakeShape } from "./atlas";
@@ -979,43 +979,47 @@ export class GameScene extends Phaser.Scene {
     g.strokeRect(s.x + 3, s.y + 3, s.size - 6, s.size - 6);
   }
 
-  /** The line at the top of the screen: match state, clock, zone, players alive. */
-  private zoneText(): { text: string; urgent: boolean } {
+  /**
+   * The line at the top of the screen: match state, clock, zone, players alive. Each part is
+   * [full text, short text for small screens] (or one text for both) and never wraps inside.
+   */
+  private zoneText(): { parts: ZonePart[]; urgent: boolean } {
     const st = this.room.state;
     const teams = this.mode === "teams";
     switch (this.phase) {
       case "warmup": {
         const { players } = this.counts();
-        const count = `Waiting for players… (${players}/${Number(st.maxPlayers) || MATCH_MIN_PLAYERS})`;
-        if (players < MATCH_MIN_PLAYERS) return { text: `${count} · warm up!`, urgent: false };
-        if (teams && !this.bothTeamsHavePlayers()) return { text: `${count} · each team needs a player`, urgent: false };
-        if (this.isHost) return { text: `${count} · starts when full, or start it now`, urgent: false };
-        return { text: `${count} · starts when full or when the host starts it`, urgent: false };
+        const of = `${players}/${Number(st.maxPlayers) || MATCH_MIN_PLAYERS}`;
+        const count: ZonePart = [`Waiting for players… (${of})`, `⏳ ${of} players`];
+        if (players < MATCH_MIN_PLAYERS) return { parts: [count, "warm up!"], urgent: false };
+        if (teams && !this.bothTeamsHavePlayers()) return { parts: [count, ["each team needs a player", "1+ per team"]], urgent: false };
+        if (this.isHost) return { parts: [count, ["starts when full, or start it now", "start when ready"]], urgent: false };
+        return { parts: [count, ["starts when full or when the host starts it", "host starts it"]], urgent: false };
       }
       case "countdown":
-        return { text: `Match starts in ${st.phaseSecondsLeft}…`, urgent: true };
+        return { parts: [`Match starts in ${st.phaseSecondsLeft}…`], urgent: true };
       case "ended":
-        return { text: `Match over · next match in ${st.phaseSecondsLeft}s`, urgent: false };
+        return { parts: ["Match over", [`next match in ${st.phaseSecondsLeft}s`, `next in ${st.phaseSecondsLeft}s`]], urgent: false };
     }
 
     const z = this.zone;
-    const clock = formatTime(Number(st.matchSeconds ?? 0));
+    const clock = `⏱ ${formatTime(Number(st.matchSeconds ?? 0))}`;
     if (teams) {
       // Your base under attack? Say so.
       const mine = this.cores.get(this.myTeam);
-      if (mine && this.time.now - mine.lastHitAt < 2500) return { text: `⏱ ${clock}  ·  ⚠ Your base is under attack!`, urgent: true };
-      return { text: `⏱ ${clock}  ·  Destroy the enemy base!`, urgent: false };
+      if (mine && this.time.now - mine.lastHitAt < 2500) return { parts: [clock, ["⚠ Your base is under attack!", "⚠ Base under attack!"]], urgent: true };
+      return { parts: [clock, ["Destroy the enemy base!", "Destroy their base!"]], urgent: false };
     }
-    const alive = `👥 ${st.aliveCount} alive`;
+    const alive: ZonePart = [`👥 ${st.aliveCount} alive`, `👥 ${st.aliveCount}`];
     const left = formatTime(z?.secondsLeft ?? 0);
     switch (z?.phase) {
       case "waiting":
       case "hold":
-        return { text: `⏱ ${clock}  ·  ${alive}  ·  Zone shrinks in ${left}`, urgent: z.secondsLeft <= 10 };
+        return { parts: [clock, alive, [`Zone shrinks in ${left}`, `Zone ${left}`]], urgent: z.secondsLeft <= 10 };
       case "shrink":
-        return { text: `⏱ ${clock}  ·  ${alive}  ·  Zone shrinking! ${left}`, urgent: true };
+        return { parts: [clock, alive, [`Zone shrinking! ${left}`, `Zone ⚠ ${left}`]], urgent: true };
       default:
-        return { text: `⏱ ${clock}  ·  ${alive}  ·  Final zone`, urgent: false };
+        return { parts: [clock, alive, "Final zone"], urgent: false };
     }
   }
 
@@ -1065,7 +1069,7 @@ export class GameScene extends Phaser.Scene {
   private updateHud(time: number, delta: number, mine?: PlayerView) {
     // Match clock, zone countdown, and the "you're outside" warning.
     const info = this.zoneText();
-    this.hud.setZoneInfo(info.text, info.urgent);
+    this.hud.setZoneInfo(info.parts, info.urgent);
     this.hud.setRoomActions(this.roomActions(mine));
     this.hud.setSpectatorView(!!mine?.data.spectator);
     this.onPlayerCountChanged();
