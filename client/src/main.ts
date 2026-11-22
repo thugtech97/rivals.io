@@ -9,6 +9,7 @@ import { TouchControls } from "./touchControls";
 import { cycleQuality, getQuality, onQualityChange, QUALITY_LABEL, type Quality } from "./quality";
 import { ARENA_ROOM, IDLE_KICK_CODE, LOBBY_ROOM } from "../../shared/constants";
 import { MAX_SPECTATORS } from "../../shared/teams";
+import { BOT_LEVEL_NAME, DEFAULT_PRACTICE_SIZE, isBotLevel, PRACTICE_SIZES, type BotLevel } from "../../shared/practice";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -19,9 +20,6 @@ const ui = {
   quickPlay: $<HTMLButtonElement>("quick-play"),
   status: $("lobby-status"),
   roomList: $<HTMLUListElement>("room-list"),
-  createForm: $<HTMLFormElement>("create-form"),
-  roomName: $<HTMLInputElement>("room-name"),
-  modeNote: $("mode-note"),
   error: $("lobby-error"),
   hud: $("hud"),
   hudRoom: $("hud-room"),
@@ -226,6 +224,9 @@ function resumeLobby() {
 if (import.meta.env.DEV) (window as any).__lobbyConnected = () => !!lobbyRoom;
 
 function renderRooms() {
+  // The menu's "Rooms" button shows how many rooms you could join right now.
+  const open = rooms.filter((r) => roomState(r) === "open").length;
+  $("rooms-count").textContent = open ? String(open) : "";
   ui.roomList.replaceChildren();
   if (lobbyRoom) setStatus("live", rooms.length ? `Live · ${rooms.length} room${rooms.length === 1 ? "" : "s"}` : "Live");
   if (lobbyPaused) {
@@ -361,28 +362,188 @@ async function quickPlay(): Promise<Room> {
 
 ui.quickPlay.onclick = () => enterGame(quickPlay, { button: ui.quickPlay, text: "Finding a match…" });
 
-// Mode picker: explain what each one is.
-const MODE_NOTES: Record<string, string> = {
-  solo: "Last soldier standing. The zone closes in.",
-  teams: "Blue vs Red. Respawn at your base, destroy the enemy's core to win.",
+// ---------- New room / Practice vs bots (one card, a toggle picks which) ----------
+//
+// Both share Mode and Size. A new room is online (others can join from the list); a practice
+// room is private and the server fills every free seat with bots.
+
+const setup = {
+  form: $<HTMLFormElement>("setup-form"),
+  roomName: $<HTMLInputElement>("room-name"),
+  sizes: $("sizes"),
+  sizeLabel: $("size-label"),
+  note: $("setup-note"),
+  go: $<HTMLButtonElement>("setup-go"),
 };
-const selectedMode = () => document.querySelector<HTMLInputElement>('input[name="mode"]:checked')?.value ?? "solo";
-for (const radio of document.querySelectorAll<HTMLInputElement>('input[name="mode"]')) {
-  radio.onchange = () => (ui.modeNote.textContent = MODE_NOTES[selectedMode()] ?? "");
+const ROOM_SIZES = [2, 4, 8, 10, 16];
+const checkedValue = (name: string) => document.querySelector<HTMLInputElement>(`input[name="${name}"]:checked`)?.value;
+const isPractice = () => checkedValue("setup") === "practice";
+const isTeams = () => checkedValue("mode") === "teams";
+
+/** Last choices (remembered in this browser). Practice and rooms each keep their own size. */
+const saved = (() => {
+  const d = { mode: "solo", level: "medium", roomSize: 8, practiceSize: DEFAULT_PRACTICE_SIZE as number };
+  try {
+    const s = JSON.parse(localStorage.getItem("rivals:setup") ?? "{}");
+    return {
+      mode: s.mode === "teams" ? "teams" : "solo",
+      level: isBotLevel(s.level) ? (s.level as string) : d.level,
+      roomSize: ROOM_SIZES.includes(s.roomSize) ? (s.roomSize as number) : d.roomSize,
+      practiceSize: (PRACTICE_SIZES as readonly number[]).includes(s.practiceSize) ? (s.practiceSize as number) : d.practiceSize,
+    };
+  } catch {
+    return d;
+  }
+})();
+
+function rememberSetup() {
+  const size = Number(checkedValue("size"));
+  if (isPractice()) saved.practiceSize = size || saved.practiceSize;
+  else saved.roomSize = size || saved.roomSize;
+  saved.mode = isTeams() ? "teams" : "solo";
+  saved.level = checkedValue("level") ?? saved.level;
+  try {
+    localStorage.setItem("rivals:setup", JSON.stringify(saved));
+  } catch {}
 }
 
-ui.createForm.onsubmit = (e) => {
-  e.preventDefault();
-  enterGame(
-    () =>
-      client.create(ARENA_ROOM, {
-        playerName: playerName(),
-        roomName: ui.roomName.value.trim(),
-        maxPlayers: Number(document.querySelector<HTMLInputElement>('input[name="max-players"]:checked')?.value ?? 8),
-        mode: selectedMode(),
-      }),
-    { button: ui.createForm.querySelector<HTMLButtonElement>("button[type=submit]")!, text: "Creating your room…" },
+/** Show the fields for the current choice, the size buttons (1v1… in teams) and a one-line summary. */
+function renderSetup() {
+  const practice = isPractice();
+  const teams = isTeams();
+  for (const el of setup.form.querySelectorAll<HTMLElement>("[data-for]")) el.hidden = el.dataset.for !== (practice ? "practice" : "room");
+  const list: number[] = practice ? [...PRACTICE_SIZES] : ROOM_SIZES;
+  const fallback = practice ? saved.practiceSize : saved.roomSize;
+  const selected = Number(checkedValue("size")) || fallback;
+  const pick = list.includes(selected) ? selected : fallback;
+  setup.sizeLabel.textContent = teams ? "Team size" : "Players";
+  setup.sizes.replaceChildren(
+    ...list.map((n) => {
+      const label = document.createElement("label");
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.name = "size";
+      input.value = String(n);
+      input.checked = n === pick;
+      input.onchange = () => showSetupNote();
+      const text = document.createElement("span");
+      text.textContent = teams ? `${n / 2}v${n / 2}` : String(n);
+      label.append(input, text);
+      return label;
+    }),
   );
+  setup.go.textContent = practice ? "🤖 Start practice" : "Create & join";
+  showSetupNote();
+}
+
+function showSetupNote() {
+  const n = Number(checkedValue("size")) || 2;
+  const teams = isTeams();
+  if (!isPractice()) {
+    setup.note.textContent = teams
+      ? "Blue vs Red. Respawn at your base, destroy the enemy's core to win."
+      : "Last soldier standing. The zone closes in.";
+    return;
+  }
+  const level = (BOT_LEVEL_NAME[(checkedValue("level") ?? "medium") as BotLevel] ?? "Medium").toLowerCase();
+  const bots = (k: number) => `${k} ${level} bot${k === 1 ? "" : "s"}`;
+  setup.note.textContent = teams
+    ? n === 2
+      ? `You vs ${bots(1)}, base against base. Private, just for you.`
+      : `You + ${n / 2 - 1} bot${n / 2 === 2 ? "" : "s"} vs ${bots(n / 2)}. Private, just for you.`
+    : `You vs ${bots(n - 1)}, last soldier standing. Private, just for you.`;
+}
+
+for (const [name, value] of [["mode", saved.mode], ["level", saved.level]] as const) {
+  for (const r of document.querySelectorAll<HTMLInputElement>(`input[name="${name}"]`)) {
+    r.checked = r.value === value;
+    r.onchange = () => renderSetup();
+  }
+}
+
+/** Create room and Practice share the form: switch it over (each remembers its own size). */
+function setSetupKind(kind: "room" | "practice") {
+  for (const r of document.querySelectorAll<HTMLInputElement>('input[name="setup"]')) r.checked = r.value === kind;
+  document.querySelectorAll<HTMLInputElement>('input[name="size"]').forEach((s) => (s.checked = false));
+  $("setup-title").textContent = kind === "practice" ? "Practice vs bots" : "Create a room";
+  renderSetup();
+}
+setSetupKind("room");
+
+// ---------- Lobby pages ----------
+//
+// The menu is on the left, the panel on its right (below it on narrow screens). The panel
+// shows How to play unless a menu button picked something else: #practice, #create, #rooms
+// (URL hashes, so the browser's Back button works, and links to them do).
+
+const PAGES: Record<string, { panel: string; init?: () => void }> = {
+  practice: { panel: "setup", init: () => setSetupKind("practice") },
+  create: { panel: "setup", init: () => setSetupKind("room") },
+  rooms: { panel: "rooms" },
+  help: { panel: "help" },
+};
+const lobbyPages = $("lobby-pages");
+const menuButtons: Record<string, HTMLElement> = {
+  practice: $("open-practice"),
+  create: $("open-create"),
+  rooms: $("open-rooms"),
+  help: $("open-help"),
+};
+/** True once we've opened a page ourselves (then ← can simply go back in history). */
+let pageOpenedHere = false;
+
+function showPage() {
+  const name = PAGES[location.hash.slice(1)] ? location.hash.slice(1) : "help";
+  const page = PAGES[name];
+  for (const [n, b] of Object.entries(menuButtons)) b.classList.toggle("active", n === name);
+  for (const el of lobbyPages.querySelectorAll<HTMLElement>("[data-panel]")) el.hidden = el.dataset.panel !== page.panel;
+  page.init?.();
+  if (!location.hash) pageOpenedHere = false;
+}
+
+function openPage(name: string) {
+  // Narrow screens: the panel is under the menu, so bring it into view.
+  if (matchMedia("(max-width: 820px)").matches) lobbyPages.scrollIntoView({ behavior: "smooth", block: "start" });
+  const current = location.hash.slice(1) || "help";
+  if (current === name) return;
+  if (name === "help") return backToMenu(); // the default page: no hash
+  // Switching pages replaces the entry, so Back returns to How to play instead of stepping through them.
+  if (PAGES[location.hash.slice(1)]) {
+    history.replaceState(null, "", `#${name}`);
+    showPage();
+    return;
+  }
+  pageOpenedHere = true;
+  location.hash = name;
+}
+
+function backToMenu() {
+  if (pageOpenedHere) history.back();
+  else history.replaceState(null, "", location.pathname + location.search);
+  showPage();
+}
+
+window.addEventListener("hashchange", showPage);
+$("open-practice").onclick = () => openPage("practice");
+$("open-create").onclick = () => openPage("create");
+$("open-rooms").onclick = () => openPage("rooms");
+$("open-help").onclick = () => openPage("help");
+showPage();
+
+setup.form.onsubmit = (e) => {
+  e.preventDefault();
+  rememberSetup();
+  const practice = isPractice();
+  const options = {
+    playerName: playerName(),
+    mode: isTeams() ? "teams" : "solo",
+    maxPlayers: Number(checkedValue("size")) || (practice ? DEFAULT_PRACTICE_SIZE : 8),
+    ...(practice ? { practice: checkedValue("level") ?? "medium" } : { roomName: setup.roomName.value.trim() }),
+  };
+  enterGame(() => client.create(ARENA_ROOM, options), {
+    button: setup.go,
+    text: practice ? "Setting up the bots…" : "Creating your room…",
+  });
 };
 
 async function enterGame(connect: () => Promise<Room>, loading: { button: HTMLButtonElement; text: string }) {
@@ -417,6 +578,8 @@ async function enterGame(connect: () => Promise<Room>, loading: { button: HTMLBu
 
   ui.hudRoom.textContent = "";
   ui.hudPlayers.textContent = "";
+  if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+  showPage(); // back in the lobby later: start on the menu
   ui.lobby.hidden = true;
   ui.shade.hidden = true;
   stopLobbyBackdrop();
@@ -514,7 +677,10 @@ ui.helpBtn.onclick = () => {
 };
 
 window.addEventListener("keydown", (e) => {
-  if (!gameRoom) return;
+  if (!gameRoom) {
+    if (e.key === "Escape" && !ui.lobby.hidden && location.hash) backToMenu();
+    return;
+  }
   // In fullscreen the browser uses Esc to exit it; only leave on an Esc of its own.
   const exitingFullscreen = !!document.fullscreenElement || performance.now() - fullscreenEndedAt < 500;
   if (e.key === "Escape" && !exitingFullscreen) leaveGame();

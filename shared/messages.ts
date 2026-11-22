@@ -11,6 +11,8 @@ export interface ShotEvent {
   x: number; // muzzle position
   y: number;
   angle: number;
+  /** Shotgun pellets after the first one in a blast: no extra sound, flash or recoil. */
+  pellet?: boolean;
 }
 
 /** "bulletEnd": a bullet hit something or ran out of range. */

@@ -23,84 +23,94 @@
     <div id="lobby-bg" class="lobby-bg"></div>
     <div id="lobby-shade" class="lobby-shade"></div>
 
-    <!-- Lobby: pick a name, browse rooms, create or join one -->
+    <!-- Lobby: a name and one column of buttons. Everything else opens in a panel on top. -->
     <main id="lobby" class="lobby">
       <header class="hero">
         <h1 class="logo">rivals<span>.io</span></h1>
         <p class="tagline">Drop in. Loot up. Be the last soldier standing.</p>
       </header>
 
-      <div class="lobby-grid">
-        <div class="lobby-col">
-          <section class="card card-play">
-            <label class="field">
-              <span>Your name</span>
+      <div class="lobby-main">
+      <section class="card menu">
+        <span class="input-wrap">
+          <span class="input-icon" aria-hidden="true">👤</span>
+          <input id="player-name" maxlength="16" placeholder="Enter your name" autocomplete="off" aria-label="Your name" />
+        </span>
+        <button id="quick-play" class="btn btn-primary btn-big"><span aria-hidden="true">▶</span> Play</button>
+        <button id="open-practice" class="btn menu-btn"><span>🤖 Practice<span class="wide-only"> vs bots</span></span></button>
+        <button id="open-create" class="btn menu-btn">➕ Create room</button>
+        <button id="open-rooms" class="btn menu-btn">🌐 Join rooms <span id="rooms-count" class="menu-count"></span></button>
+        <button id="open-help" class="btn menu-btn">❓ How to play</button>
+      </section>
+
+      <!-- Right panel (below the menu on narrow screens): How to play by default; the menu
+           buttons swap in Practice, Create or Join rooms (#practice, #create, #rooms). -->
+      <div id="lobby-pages" class="lobby-pages">
+        <!-- Create room / Practice vs bots: the same form ("setup" says which) -->
+        <section class="card page" data-panel="setup" hidden>
+          <div class="card-head">
+            <h2 id="setup-title">Create a room</h2>
+          </div>
+          <form id="setup-form" class="create-form">
+            <input type="radio" name="setup" value="room" checked hidden />
+            <input type="radio" name="setup" value="practice" hidden />
+            <div class="field">
+              <span>Mode</span>
+              <div class="segmented segmented-2" role="radiogroup" aria-label="Mode">
+                <label><input type="radio" name="mode" value="solo" checked /><span>🏆 Solo</span></label>
+                <label><input type="radio" name="mode" value="teams" /><span>⚔️ Teams</span></label>
+              </div>
+            </div>
+            <label class="field" data-for="room">
+              <span>Room name</span>
               <span class="input-wrap">
-                <span class="input-icon" aria-hidden="true">👤</span>
-                <input id="player-name" maxlength="16" placeholder="Enter your name" autocomplete="off" />
+                <span class="input-icon" aria-hidden="true">🏷️</span>
+                <input id="room-name" maxlength="24" placeholder="My arena" autocomplete="off" />
               </span>
             </label>
-            <button id="quick-play" class="btn btn-primary btn-big">
-              <span aria-hidden="true">▶</span> Quick play
-            </button>
-            <p class="card-note">Jumps into an open room, or starts a new one.</p>
-          </section>
-
-          <section class="card">
-            <h2>Create a room</h2>
-            <form id="create-form" class="create-form">
-              <label class="field">
-                <span>Room name</span>
-                <span class="input-wrap">
-                  <span class="input-icon" aria-hidden="true">🏷️</span>
-                  <input id="room-name" maxlength="24" placeholder="My arena" autocomplete="off" />
-                </span>
-              </label>
-              <div class="field">
-                <span>Mode</span>
-                <div class="segmented segmented-2" role="radiogroup" aria-label="Mode">
-                  <label><input type="radio" name="mode" value="solo" checked /><span>🏆 Solo</span></label>
-                  <label><input type="radio" name="mode" value="teams" /><span>⚔️ Teams</span></label>
-                </div>
-                <small id="mode-note" class="field-note">Last soldier standing. The zone closes in.</small>
+            <div class="field" data-for="practice" hidden>
+              <span>Bots</span>
+              <div class="segmented segmented-2" role="radiogroup" aria-label="Bot difficulty">
+                <label><input type="radio" name="level" value="easy" /><span>Easy</span></label>
+                <label><input type="radio" name="level" value="medium" checked /><span>Medium</span></label>
+                <label><input type="radio" name="level" value="hard" /><span>Hard</span></label>
               </div>
-              <div class="field">
-                <span>Max players</span>
-                <div class="segmented" role="radiogroup" aria-label="Max players">
-                  <label><input type="radio" name="max-players" value="2" /><span>2</span></label>
-                  <label><input type="radio" name="max-players" value="4" /><span>4</span></label>
-                  <label><input type="radio" name="max-players" value="8" checked /><span>8</span></label>
-                  <label><input type="radio" name="max-players" value="10" /><span>10</span></label>
-                  <label><input type="radio" name="max-players" value="16" /><span>16</span></label>
-                </div>
-              </div>
-              <button type="submit" class="btn btn-secondary">Create &amp; join</button>
-            </form>
-          </section>
-        </div>
+            </div>
+            <div class="field">
+              <span id="size-label">Players</span>
+              <div id="sizes" class="segmented" role="radiogroup" aria-label="Size"></div>
+            </div>
+            <small id="setup-note" class="field-note"></small>
+            <button id="setup-go" type="submit" class="btn btn-secondary">Create &amp; join</button>
+          </form>
+        </section>
 
-        <section class="card card-rooms">
+        <section class="card page card-rooms" data-panel="rooms" hidden>
           <div class="card-head">
-            <h2>Rooms</h2>
+            <h2>Join rooms</h2>
             <span id="lobby-status" class="status" data-state="connecting">Connecting…</span>
           </div>
           <ul id="room-list" class="room-list"></ul>
         </section>
+
+        <section class="card page" data-panel="help">
+          <div class="card-head">
+            <h2>How to play</h2>
+          </div>
+          <ul class="how-to">
+            <li>🏆 <b>Solo:</b> last soldier standing. Stay out of the red zone.</li>
+            <li>⚔️ <b>Teams:</b> Blue vs Red. Destroy the enemy base.</li>
+            <li>🤖 <b>Practice:</b> a private room against bots (easy, medium or hard).</li>
+            <li><kbd>WASD</kbd> move · <kbd>Mouse</kbd> aim &amp; shoot · <kbd>1</kbd>–<kbd>5</kbd> switch · <kbd>R</kbd> reload</li>
+            <li><kbd>E</kbd> loot · <kbd>G</kbd> drop · <kbd>F</kbd> ride 🏍️ 🚙 · 🌳 hide in trees</li>
+            <li>🔫 10 weapons · 💥 shotgun, bazooka &amp; grenades · 🛡️ vests · 👟 boots · ➕ medkits</li>
+            <li>👁 Watch any room from the room list.</li>
+          </ul>
+        </section>
+      </div>
       </div>
 
       <p id="lobby-error" class="error" hidden></p>
-
-      <footer class="how-to">
-        <span><kbd>WASD</kbd> move</span>
-        <span><kbd>Mouse</kbd> aim &amp; shoot</span>
-        <span><kbd>E</kbd> loot</span>
-        <span><kbd>F</kbd> ride 🏍️ 🚙</span>
-        <span>🌳 hide in trees</span>
-        <span>🔫 9 weapons · 💥 bazooka &amp; grenades · 🛡️ vests · 👟 speed boots · ➕ medkits</span>
-        <span>🟥 stay out of the red zone</span>
-        <span>⚔️ Teams: destroy the enemy base</span>
-        <span>👁 Watch any room</span>
-      </footer>
     </main>
 
     <!-- In-game HUD and Phaser canvas -->

@@ -198,6 +198,7 @@ function drawHands(g: G, right: [number, number], left: [number, number]) {
 const GRIP: Partial<Record<WeaponId, [[number, number], [number, number]]>> & { fists: [[number, number], [number, number]] } = {
   pistol: [[15, 7], [17, 1]],
   rifle: [[10, 9], [22, 5]],
+  shotgun: [[10, 9], [27, 6]],
   mg: [[10, 11], [26, 6]],
   sniper: [[10, 9], [25, 5]],
   bazooka: [[12, 11], [26, 9]],
@@ -211,7 +212,7 @@ const GRIP: Partial<Record<WeaponId, [[number, number], [number, number]]>> & { 
 function drawArmsWithWeapon(g: G, id: WeaponId, color: number) {
   const [right, left] = GRIP[id] ?? GRIP.fists;
   // Two-handed guns sit under the arms; blades are drawn on top of the hand holding them.
-  const gunFirst = id === "pistol" || id === "rifle" || id === "mg" || id === "sniper" || id === "bazooka";
+  const gunFirst = id === "pistol" || id === "rifle" || id === "shotgun" || id === "mg" || id === "sniper" || id === "bazooka";
   if (gunFirst) drawWeaponShape(g, id, 0, 0);
   drawArms(g, color, right, left);
   if (!gunFirst && id !== "fists") drawWeaponShape(g, id, 0, 0);
@@ -238,6 +239,17 @@ export function drawWeaponShape(g: G, id: WeaponId, ox: number, oy: number) {
       g.fillStyle(GUN_METAL, 1);
       r(26, 4.5, 11, 3); // barrel
       r(9, 4, 10, 2);
+      break;
+    case "shotgun":
+      g.fillStyle(WOOD, 1);
+      r(-4, 4, 12, 6); // wooden stock
+      g.fillStyle(GUN_DARK, 1);
+      r(8, 3, 14, 7); // receiver
+      g.fillStyle(GUN_METAL, 1);
+      r(22, 3, 22, 2.5); // twin barrels
+      r(22, 6, 22, 2.5);
+      g.fillStyle(WOOD, 1);
+      r(24, 8, 10, 4); // pump
       break;
     case "mg":
       g.fillStyle(GUN_DARK, 1);
@@ -322,7 +334,7 @@ export function itemGlow(kind: string, weapon: string): number {
   if (kind === "boots") return 0x4fe0b6;
   if (kind === "ammo") return 0xd9a441;
   return (
-    ({ sniper: 0xffc94a, mg: 0xc07aff, rifle: 0x63b3ff, pistol: 0xc9ced6, bazooka: 0xff7a3a, grenade: 0xff7a3a } as Record<string, number>)[weapon] ??
+    ({ sniper: 0xffc94a, mg: 0xc07aff, rifle: 0x63b3ff, shotgun: 0xff8f6b, pistol: 0xc9ced6, bazooka: 0xff7a3a, grenade: 0xff7a3a } as Record<string, number>)[weapon] ??
     0x7ee08a
   );
 }

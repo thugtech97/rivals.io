@@ -2,7 +2,7 @@
 // Tweak numbers here to balance the game.
 
 /** "turret" is the team base's built-in gun (team mode): never dropped, never in anyone's hands. */
-export type GunId = "pistol" | "rifle" | "mg" | "sniper" | "bazooka" | "grenade" | "turret";
+export type GunId = "pistol" | "rifle" | "shotgun" | "mg" | "sniper" | "bazooka" | "grenade" | "turret";
 export type MeleeId = "knife" | "sword" | "axe" | "fists";
 export type WeaponId = GunId | MeleeId;
 
@@ -23,8 +23,13 @@ export interface GunStats {
   reloadMs: number;
   bulletSpeed: number; // px/s
   bulletLifeMs: number; // range ≈ speed × life
-  /** Random aim wobble per shot, in radians (each way). */
+  /** Random aim wobble per shot, in radians (each way). With `pellets`: how wide the fan is (each way). */
   spread: number;
+  /**
+   * Shotguns: each shot is this many pellets fanned out across ±spread, each doing `damage`.
+   * Up close they all hit; further away the fan opens up and most of them miss.
+   */
+  pellets?: number;
   /** Movement speed while holding it (1 = normal). */
   moveMul: number;
   /** How far in front of the soldier the barrel ends. */
@@ -67,6 +72,12 @@ export const WEAPONS: Record<WeaponId, WeaponStats> = {
   rifle: {
     kind: "gun", name: "Rifle", damage: 25, fireMs: 130, mag: 25, lootReserve: 50, maxReserve: 100, boxAmmo: 50,
     reloadMs: 1500, bulletSpeed: 950, bulletLifeMs: 650, spread: 0.035, moveMul: 0.95, muzzle: 37,
+  },
+  // 8 pellets × 13 = 104 point blank (a one-shot without a vest), but only reaches ~290px
+  // and the fan opens up fast: at the edge of its range only a pellet or two connect.
+  shotgun: {
+    kind: "gun", name: "Shotgun", damage: 13, fireMs: 750, mag: 6, lootReserve: 12, maxReserve: 24, boxAmmo: 12,
+    reloadMs: 2200, bulletSpeed: 1000, bulletLifeMs: 290, spread: 0.17, moveMul: 0.95, muzzle: 38, pellets: 8,
   },
   mg: {
     kind: "gun", name: "Machine gun", damage: 16, fireMs: 75, mag: 60, lootReserve: 60, maxReserve: 120, boxAmmo: 80,
@@ -142,6 +153,7 @@ export const LOOT_TABLE: {
 }[] = [
   { item: "medkit", count: 8, teamPerPlayer: 0.5 },
   { item: "weapon", weapon: "rifle", count: 5, teamPerPlayer: 0.5 },
+  { item: "weapon", weapon: "shotgun", count: 3, teamPerPlayer: 0.25 },
   { item: "weapon", weapon: "mg", count: 2, teamPerPlayer: 0.25 },
   { item: "weapon", weapon: "sniper", count: 2, teamPerPlayer: 0.25 },
   { item: "weapon", weapon: "pistol", count: 3, teamPerPlayer: 0.25 },

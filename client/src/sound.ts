@@ -12,6 +12,7 @@ const MUTE_KEY = "rivals:muted";
 const GUN_VOICES: Record<string, { crack: number; body: number; thump: number; decay: number; vol: number; reach: number }> = {
   pistol: { crack: 3200, body: 3000, thump: 180, decay: 0.09, vol: 0.75, reach: 0.9 },
   rifle: { crack: 2500, body: 2600, thump: 140, decay: 0.14, vol: 1, reach: 1 },
+  shotgun: { crack: 2000, body: 1500, thump: 90, decay: 0.26, vol: 1.25, reach: 1.25 },
   mg: { crack: 2200, body: 2200, thump: 120, decay: 0.1, vol: 0.85, reach: 1.05 },
   sniper: { crack: 1800, body: 1800, thump: 80, decay: 0.32, vol: 1.25, reach: 1.6 },
   bazooka: { crack: 900, body: 1400, thump: 70, decay: 0.4, vol: 1.1, reach: 1.4 },
@@ -93,6 +94,8 @@ export class Sfx {
     osc.frequency.setValueAtTime(v.thump, t);
     osc.frequency.exponentialRampToValueAtTime(v.thump / 3, t + v.decay * 0.8);
     this.env(osc, node, t, 0.9, v.decay);
+    // The shotgun's blast is a deep, wide boom
+    if (weapon === "shotgun") this.noiseHit(node, t + 0.01, { type: "lowpass", freq: 900, vol: 0.9, decay: 0.3, sweepTo: 120 });
     // The sniper's shot rolls on for a moment
     if (weapon === "sniper") this.noiseHit(node, t + 0.06, { type: "lowpass", freq: 500, vol: 0.5, decay: 0.5, sweepTo: 150 });
     // The rocket's whoosh as it leaves the tube

@@ -58,6 +58,8 @@ export class Player extends Schema {
   healCarry = 0;
   /** When this player joined (team balancing moves the newest players first). */
   joinedAt = 0;
+  /** Shooting, swinging or getting hit gives away a tree hiding spot until then (bots use this). */
+  revealedUntil = 0;
 }
 
 /** A rideable motorbike or car (see shared/vehicles.ts). Placed at match start, never destroyed. */
@@ -164,6 +166,8 @@ export class ArenaState extends Schema {
   @type("number") phaseSecondsLeft = 0;
   /** "solo" (last soldier standing) or "teams" (Blue vs Red, destroy the enemy base). Fixed per room. */
   @type("string") mode = "solo";
+  /** Practice room: the bots' difficulty ("easy" | "medium" | "hard"). "" = a normal room. Fixed per room. */
+  @type("string") practice = "";
   /** sessionId of the last player alive ("" if nobody survived). Solo mode. */
   @type("string") winner = "";
   /** Team mode: the team that won ("blue" | "red", "" = nobody). */

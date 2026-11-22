@@ -716,6 +716,11 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** The host can start the match before the room is full. */
+  /** Practice room (vs bots): the bots' difficulty, "" otherwise. */
+  private get practice(): string {
+    return String(this.room.state.practice ?? "");
+  }
+
   private get isHost(): boolean {
     return this.room.state.hostId === this.room.sessionId;
   }
@@ -991,6 +996,7 @@ export class GameScene extends Phaser.Scene {
         const { players } = this.counts();
         const of = `${players}/${Number(st.maxPlayers) || MATCH_MIN_PLAYERS}`;
         const count: ZonePart = [`Waiting for players… (${of})`, `⏳ ${of} players`];
+        if (this.practice) return { parts: ["🤖 Practice", ["press 🎮 Play to start", "🎮 Play to start"]], urgent: false };
         if (players < MATCH_MIN_PLAYERS) return { parts: [count, "warm up!"], urgent: false };
         if (teams && !this.bothTeamsHavePlayers()) return { parts: [count, ["each team needs a player", "1+ per team"]], urgent: false };
         if (this.isHost) return { parts: [count, ["starts when full, or start it now", "start when ready"]], urgent: false };
@@ -1180,6 +1186,9 @@ export class GameScene extends Phaser.Scene {
       const next = `Next match in ${st.phaseSecondsLeft}s`;
       if (st.winner === this.room.sessionId) this.hud.setBanner("🏆 You win!", `Last soldier standing · ${next}`, true);
       else if (winner) this.hud.setBanner(`🏆 ${winner.data.name} wins!`, `You placed #${mine?.data.place || "?"} · ${next}`, false);
+      else if (this.practice && mine?.data.place)
+        // Practice: the match ends as soon as you're out, with bots still standing.
+        this.hud.setBanner(`You placed #${mine.data.place}`, `${st.aliveCount} bot${st.aliveCount === 1 ? "" : "s"} still standing · ${next}`, false);
       else this.hud.setBanner("No survivors", next, false);
     } else {
       this.hud.setBanner(null);
@@ -1215,7 +1224,8 @@ export class GameScene extends Phaser.Scene {
     let team: string | null = null;
     if (d && !d.spectator && this.mode === "teams" && before && isTeam(d.team)) {
       const other = otherTeam(d.team);
-      if (this.teamCount(other) < Math.ceil(max / 2)) team = `⇄ Join ${TEAM_NAME[other]}`;
+      // (Practice: a bot on the other team swaps sides with you.)
+      if (this.teamCount(other) < Math.ceil(max / 2) || this.practice) team = `⇄ Join ${TEAM_NAME[other]}`;
     }
     let spectate: string | null = null;
     if (d?.spectator) spectate = before && players < max ? "🎮 Play" : null;
@@ -1524,6 +1534,8 @@ export class GameScene extends Phaser.Scene {
           ? { len: 34, w: 3, c: 0xffffff }
           : shot.weapon === "mg"
             ? { len: 14, w: 2, c: 0xffd27a }
+            : shot.weapon === "shotgun"
+              ? { len: 9, w: 2.5, c: 0xffc070 }
             : shot.weapon === "bazooka"
               ? { len: 18, w: 7, c: 0x55603a }
               : { len: 16, w: 3, c: 0xffe08a };
@@ -1558,16 +1570,18 @@ export class GameScene extends Phaser.Scene {
       weapon: shot.weapon,
       smokeInMs: 0,
     });
+    // Shotgun: the other pellets of the same blast only add their tracer.
+    if (shot.pellet) return;
     sfx.gunshot(startX, startY, shot.owner === this.room.sessionId, shot.weapon);
 
     // Muzzle flash (bigger for the sniper)
-    const flashSize = shot.weapon === "bazooka" ? 16 : shot.weapon === "sniper" ? 12 : shot.weapon === "pistol" ? 5 : 7;
+    const flashSize = shot.weapon === "bazooka" ? 16 : shot.weapon === "sniper" || shot.weapon === "shotgun" ? 12 : shot.weapon === "pistol" ? 5 : 7;
     const flash = this.add.circle(startX, startY, flashSize, 0xfff1b0, 1).setDepth(25);
     this.tweens.add({ targets: flash, scale: 0.2, alpha: 0, duration: 70, onComplete: () => flash.destroy() });
 
     // Recoil kick on the shooter
     if (shooter) {
-      const kick = shot.weapon === "bazooka" ? 7 : shot.weapon === "sniper" ? 5 : 2;
+      const kick = shot.weapon === "bazooka" ? 7 : shot.weapon === "sniper" || shot.weapon === "shotgun" ? 5 : 2;
       const body = shooter.soldier.body;
       this.tweens.killTweensOf(body);
       body.setPosition(0, 0);
@@ -1606,6 +1620,8 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
+  private lastImpactSoundAt = 0;
+
   private endBullet(end: BulletEndEvent) {
     const b = this.bullets.get(end.id);
     const angle = b ? Math.atan2(b.vy, b.vx) : Math.random() * Math.PI * 2;
@@ -1619,16 +1635,23 @@ export class GameScene extends Phaser.Scene {
     if (victim) {
       // Blood sprays out the way the bullet was going; a vest makes a metallic "tink" too.
       this.blood.bulletHit(end.x, end.y, angle);
+      // Several shotgun pellets landing together sound like one hit.
+      const quiet = this.time.now - victim.lastBulletHitAt < 40;
       victim.lastBulletHitAt = this.time.now;
-      sfx.fleshHit(end.x, end.y);
-      if (end.armored) sfx.armorHit(end.x, end.y);
-      if (b?.owner === this.room.sessionId) sfx.hitMarker();
+      if (!quiet) {
+        sfx.fleshHit(end.x, end.y);
+        if (end.armored) sfx.armorHit(end.x, end.y);
+        if (b?.owner === this.room.sessionId) sfx.hitMarker();
+      }
     } else {
       this.impactEffect(end.x, end.y);
       // Only make a "ping" when it actually hit something (not when it just ran out of range).
       const blocked = this.map?.pointBlocked(end.x, end.y);
       const edge = end.x <= 1 || end.y <= 1 || end.x >= ARENA_SIZE - 1 || end.y >= ARENA_SIZE - 1;
-      if (blocked || edge) sfx.impact(end.x, end.y);
+      if ((blocked || edge) && this.time.now - this.lastImpactSoundAt >= 40) {
+        this.lastImpactSoundAt = this.time.now;
+        sfx.impact(end.x, end.y);
+      }
     }
   }
 
@@ -2025,7 +2048,7 @@ function itemTexture(scene: Phaser.Scene, kind: string, weapon: string): string 
   if (kind === "weapon") {
     const key = `item-weapon-${weapon}`;
     // Weapons are drawn shifted so their middle sits near (0, 0): x within ±42, y within ±17.
-    const shift = weapon === "sword" || weapon === "axe" ? -30 : weapon === "bazooka" ? -20 : weapon === "sniper" ? -22 : -18;
+    const shift = weapon === "sword" || weapon === "axe" ? -30 : weapon === "bazooka" || weapon === "shotgun" ? -20 : weapon === "sniper" ? -22 : -18;
     bakeShape(scene, key, 84, 34, ITEM_RES, (g) => drawWeaponShape(g, weapon as WeaponId, shift, -9));
     return key;
   }

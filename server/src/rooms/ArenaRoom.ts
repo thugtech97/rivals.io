@@ -69,6 +69,9 @@ import {
   type Team,
 } from "../../../shared/teams";
 import { GameMap, newMapSeed, ROADS } from "../../../shared/map";
+import { BOT_LEVEL_NAME, BOT_NAMES, isBotLevel, type BotLevel } from "../../../shared/practice";
+import { BotBrain, type BotWorld } from "../bots/BotBrain";
+import { NavGrid } from "../bots/navGrid";
 import {
   BOOTS_DURATION_MS,
   BOOTS_SPEED_MUL,
@@ -102,6 +105,10 @@ const DROP_BLOCK_MS = 2500;
 const TURRET_SCAN_MS = 200;
 /** Switching weapons takes a moment before you can attack. */
 const SWITCH_DELAY_MS = 180;
+/** Shooting / getting hit gives away a tree hiding spot this long (same as the client's REVEAL_MS). */
+const REVEAL_MS = 1200;
+/** Bots' session ids start with this (real ones never do). */
+const BOT_ID_PREFIX = "bot-";
 
 // Zone timings. The env vars are only for quick local testing, e.g.
 // ZONE_START_MS=20000 npm run dev:server  → the zone starts shrinking after 20 seconds.
@@ -114,6 +121,8 @@ const idleKickMs = Number(process.env.IDLE_KICK_MS) || IDLE_KICK_MS;
 const hostIdleMs = Number(process.env.HOST_IDLE_MS) || HOST_IDLE_MS;
 /** TEST_HOOKS=1 enables a "debugTeleport" message for automated tests. Never set it in production. */
 const TEST_HOOKS = process.env.TEST_HOOKS === "1";
+/** BOT_DEBUG=1 logs what every practice bot is up to, every 5 seconds. */
+const BOT_DEBUG = process.env.BOT_DEBUG === "1";
 
 /** Shown in the lobby's room list (kept up to date as people join, leave and matches start). */
 export interface ArenaMetadata {
@@ -136,6 +145,8 @@ interface ArenaOptions {
   mode?: string;
   /** Join only to watch. */
   spectate?: boolean;
+  /** Create a private practice room with bots of this difficulty ("easy" | "medium" | "hard"). */
+  practice?: string;
 }
 
 interface Bullet {
@@ -181,10 +192,25 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
   private map!: GameMap;
   /** Last lobby listing sent (only re-sent when something in it changed). */
   private listingKey = "";
+  /** Practice rooms: the bots' difficulty (null = a normal room, no bots). */
+  private practice: BotLevel | null = null;
+  /** Practice rooms: every bot's brain, keyed by its (fake) session id. */
+  private bots = new Map<string, BotBrain>();
+  private nextBotId = 1;
+  private botDebugAt = 0;
+  /** What bots know about the current map (rebuilt with every new map). */
+  private nav!: NavGrid;
+  private botWorld!: BotWorld;
 
   async onCreate(options: ArenaOptions) {
     this.setState(new ArenaState());
     this.state.mode = options.mode === "teams" ? "teams" : "solo";
+    if (isBotLevel(options.practice)) {
+      this.practice = options.practice;
+      this.state.practice = options.practice;
+      this.botWorld = this.makeBotWorld();
+      await this.setPrivate(true); // not in the lobby's room list
+    }
     this.newMap();
     this.resetZone();
     this.resetCores();
@@ -198,7 +224,9 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     this.maxClients = maxPlayers + MAX_SPECTATORS;
 
     const hostName = cleanText(options.playerName, NAME_MAX_LENGTH) || "Someone";
-    const roomName = cleanText(options.roomName, ROOM_NAME_MAX_LENGTH) || `${hostName}'s arena`;
+    const roomName = this.practice
+      ? `Practice · ${BOT_LEVEL_NAME[this.practice]} bots`
+      : cleanText(options.roomName, ROOM_NAME_MAX_LENGTH) || `${hostName}'s arena`;
     this.state.roomName = roomName;
     await this.setMetadata({ roomName, hostName, mode: this.mode, players: 0, maxPlayers, spectators: 0, phase: "warmup" });
 
@@ -225,12 +253,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     // Switch weapon slot (1-5 or mouse wheel)
     this.onMessage("slot", (client, index: number) => {
       this.markActive(client.sessionId);
-      const p = this.state.players.get(client.sessionId);
-      const i = Math.floor(Number(index));
-      if (!p?.alive || !(i >= 0 && i < SLOT_COUNT) || p.active === i) return;
-      p.active = i;
-      p.reloading = false;
-      p.nextShotAt = Math.max(p.nextShotAt, this.clock.currentTime + SWITCH_DELAY_MS);
+      this.selectSlot(client.sessionId, index);
     });
 
     // G: drop the weapon in your hand
@@ -272,9 +295,16 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       const phase = this.state.matchPhase;
       if (!p || p.spectator || this.mode !== "teams" || !isTeam(wanted) || p.team === wanted) return;
       if (phase !== "warmup" && phase !== "countdown") return;
-      if (this.teamSize(wanted) >= this.teamCapacity()) return;
+      if (this.teamSize(wanted) >= this.teamCapacity()) {
+        // Practice: the other team is full of bots, so one of them swaps sides with you.
+        const bot = this.practice ? this.botOnTeam(wanted) : undefined;
+        if (!bot) return;
+        this.setTeam(bot, otherTeam(wanted));
+        this.respawn(bot);
+      }
       this.setTeam(p, wanted);
       this.respawn(p); // over to the new team's base
+      this.assignBotRoles();
     });
 
     // Watch instead of playing (any time), or start playing again (before a match only).
@@ -291,6 +321,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
         if (this.mode === "teams") this.setTeam(p, this.smallerTeam());
         this.respawn(p);
         this.ensureHost();
+        this.assignBotRoles();
       }
     });
 
@@ -349,6 +380,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     this.state.players.set(client.sessionId, player);
     this.heldKeys.set(client.sessionId, { ...NO_INPUT });
     this.ensureHost();
+    this.fillBots();
     const as = player.spectator ? "spectator" : player.team ? `${player.team} team` : "player";
     console.log(`[${this.roomId}] ${player.name} joined as ${as} (${this.playerCount()}/${this.state.maxPlayers} players)`);
   }
@@ -364,6 +396,162 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     console.log(`[${this.roomId}] ${player?.name ?? client.sessionId} left`);
     // The host left: the player who has been here longest takes over.
     this.ensureHost();
+    this.fillBots();
+  }
+
+  /** Bots are players without a client (practice rooms only). */
+  private isBot(sessionId: string): boolean {
+    return sessionId.startsWith(BOT_ID_PREFIX);
+  }
+
+  /** Hold a weapon slot (the "slot" message, and bots). */
+  private selectSlot(sessionId: string, index: number) {
+    const p = this.state.players.get(sessionId);
+    const i = Math.floor(Number(index));
+    if (!p?.alive || !(i >= 0 && i < SLOT_COUNT) || p.active === i) return;
+    p.active = i;
+    p.reloading = false;
+    p.nextShotAt = Math.max(p.nextShotAt, this.clock.currentTime + SWITCH_DELAY_MS);
+  }
+
+  // ---------- Practice bots ----------
+
+  /** What bots can see and do: the same actions a client's messages trigger. */
+  private makeBotWorld(): BotWorld {
+    const room = this;
+    const withPlayer = (id: string, fn: (p: Player) => void) => {
+      const p = room.state.players.get(id);
+      if (p?.alive) fn(p);
+    };
+    return {
+      get state() {
+        return room.state;
+      },
+      get map() {
+        return room.map;
+      },
+      get nav() {
+        return room.nav;
+      },
+      get teams() {
+        return room.mode === "teams";
+      },
+      get now() {
+        return room.clock.currentTime;
+      },
+      isOutsideZone: (x, y) => room.isOutsideZone(x, y),
+      selectSlot: (id, index) => room.selectSlot(id, index),
+      reload: (id) => withPlayer(id, (p) => room.startReload(p)),
+      pickup: (id) => withPlayer(id, (p) => room.manualPickup(p, id)),
+      dropSlot: (id, index) => withPlayer(id, (p) => room.dropSlot(p, id, index)),
+    };
+  }
+
+  /**
+   * Practice rooms: bots take every playing seat that people don't (a person who goes to
+   * watch keeps their seat, so "🎮 Play" still works). Team mode keeps the sides even.
+   * Only between matches: mid-match the line-up stays as it is.
+   */
+  private fillBots() {
+    if (!this.practice) return;
+    const phase = this.state.matchPhase;
+    if (phase !== "warmup" && phase !== "countdown") return;
+    let people = 0;
+    this.state.players.forEach((_p, id) => {
+      if (!this.isBot(id)) people++;
+    });
+    const wanted = people === 0 ? 0 : Math.max(0, this.state.maxPlayers - people);
+    const teams = this.mode === "teams";
+    while (this.bots.size > wanted) {
+      // Take one off the bigger team (any bot in solo).
+      const from = teams ? (this.teamSize("blue") >= this.teamSize("red") ? "blue" : "red") : "";
+      const id = [...this.bots.keys()].reverse().find((b) => !teams || this.state.players.get(b)?.team === from) ?? [...this.bots.keys()].pop()!;
+      this.removeBot(id);
+    }
+    while (this.bots.size < wanted) this.addBot();
+    this.assignBotRoles();
+  }
+
+  private addBot() {
+    const id = `${BOT_ID_PREFIX}${this.nextBotId++}`;
+    const taken = new Set<string>();
+    this.state.players.forEach((p) => taken.add(p.name));
+    const free = BOT_NAMES.filter((n) => !taken.has(`Bot ${n}`));
+    const name = free.length ? free[Math.floor(Math.random() * free.length)] : String(this.nextBotId);
+    const p = new Player();
+    p.name = `Bot ${name}`;
+    p.joinedAt = this.clock.currentTime;
+    p.lastActiveAt = this.clock.currentTime;
+    if (this.mode === "teams") this.setTeam(p, this.smallerTeam());
+    else p.color = COLORS[this.state.players.size % COLORS.length];
+    this.respawn(p);
+    this.state.players.set(id, p);
+    this.heldKeys.set(id, { ...NO_INPUT });
+    this.bots.set(id, new BotBrain(id, this.practice!));
+  }
+
+  private removeBot(id: string) {
+    const p = this.state.players.get(id);
+    if (p) this.dismount(p, id, false);
+    this.state.players.delete(id);
+    this.heldKeys.delete(id);
+    this.bots.delete(id);
+  }
+
+  private botOnTeam(team: Team): Player | undefined {
+    for (const id of this.bots.keys()) {
+      const p = this.state.players.get(id);
+      if (p && p.team === team) return p;
+    }
+    return undefined;
+  }
+
+  /**
+   * Team mode: in teams of 3+, every third bot guards the base instead of attacking; the
+   * attackers take turns going up the middle or round either flank.
+   */
+  private assignBotRoles() {
+    if (this.mode !== "teams") return;
+    for (const team of TEAMS) {
+      const size = this.teamSize(team);
+      let n = 0;
+      for (const [id, brain] of this.bots) {
+        if (this.state.players.get(id)?.team !== team) continue;
+        brain.role = size >= 3 && n % 3 === 2 ? "defend" : "attack";
+        brain.route = (["mid", "left", "right"] as const)[n % 3 === 2 ? 0 : n % 3 === 1 ? 1 : (Math.floor(n / 3) % 2) * 2];
+        n++;
+      }
+    }
+  }
+
+  /** Every tick: each bot decides what it's pressing, just like a client's "input" message. */
+  private updateBots(dtMs: number) {
+    for (const [id, brain] of this.bots) {
+      const p = this.state.players.get(id);
+      if (!p) continue;
+      p.lastActiveAt = this.clock.currentTime; // bots are never AFK
+      this.heldKeys.set(id, { ...brain.update(this.botWorld, p, dtMs) });
+    }
+    if (BOT_DEBUG && this.clock.currentTime >= this.botDebugAt) {
+      this.botDebugAt = this.clock.currentTime + 5000;
+      const line = [...this.bots].map(([id, b]) => {
+        const p = this.state.players.get(id)!;
+        return `${p.name.slice(4)}${p.team ? "/" + p.team[0] : ""}@${Math.round(p.x)},${Math.round(p.y)} ${p.alive ? b.goal : "dead"}`;
+      });
+      console.log(`[${this.roomId}] bots: ${line.join(" | ")}`);
+    }
+  }
+
+  /** Practice solo match: every person in it is out (no point making them watch the bots finish). */
+  private peopleAllOut(): boolean {
+    if (!this.practice) return false;
+    let inMatch = false;
+    for (const [id, p] of this.state.players) {
+      if (this.isBot(id) || p.spectator) continue;
+      if (p.alive) return false;
+      inMatch = true;
+    }
+    return inMatch;
   }
 
   private setHost(sessionId: string) {
@@ -377,7 +565,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     const host = this.state.players.get(this.state.hostId);
     if (host && !host.spectator) return;
     for (const [id, p] of this.state.players) {
-      if (!p.spectator) return this.setHost(id);
+      if (!p.spectator && !this.isBot(id)) return this.setHost(id);
     }
     if (!host) this.state.hostId = ""; // only spectators left: a spectator host is better than none
   }
@@ -506,7 +694,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     const host = s.players.get(s.hostId);
     if (!host || now - host.lastActiveAt < hostIdleMs) return;
     for (const [id, p] of s.players) {
-      if (id !== s.hostId && !p.spectator && now - (this.lastInputAt.get(id) ?? -Infinity) < hostIdleMs) {
+      if (id !== s.hostId && !p.spectator && !this.isBot(id) && now - (this.lastInputAt.get(id) ?? -Infinity) < hostIdleMs) {
         console.log(`[${this.roomId}] ${host.name} is AFK, ${p.name} is the host now`);
         this.setHost(id);
         return;
@@ -526,6 +714,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       if (!teams) this.updateZone(now); // team matches have no shrinking zone
     }
     const practice = this.state.matchPhase === "warmup" || this.state.matchPhase === "countdown";
+    if (this.bots.size) this.updateBots(dtMs);
 
     this.state.players.forEach((player, sessionId) => {
       if (player.spectator) return;
@@ -710,51 +899,64 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
   private fire(owner: string, player: Player, slot: WeaponSlot, gun: GunStats, now: number) {
     slot.ammo--;
     player.nextShotAt = now + gun.fireMs;
+    player.revealedUntil = now + REVEAL_MS;
 
-    const angle = player.angle + (Math.random() * 2 - 1) * gun.spread;
     const muzzle = muzzlePosition(player, player.angle, gun.muzzle);
-    const bullet: Bullet = {
-      id: this.nextBulletId++,
-      owner,
-      team: player.team,
-      weapon: slot.weapon as WeaponId,
-      damage: gun.damage,
-      speed: gun.bulletSpeed,
-      x: muzzle.x,
-      y: muzzle.y,
-      vx: Math.cos(angle) * gun.bulletSpeed,
-      vy: Math.sin(angle) * gun.bulletSpeed,
-      expiresAt: now + gun.bulletLifeMs,
-      splash: gun.splash,
-    };
-
-    const shot: ShotEvent = { id: bullet.id, owner, weapon: bullet.weapon, x: bullet.x, y: bullet.y, angle };
-    this.broadcast("shot", shot);
-
     // Pressed against a wall? The barrel is inside it, so the shot stops right there
     // (no shooting through cover). A rocket goes off in your face.
     let freeX = player.x;
     let freeY = player.y;
+    let blocked: { x: number; y: number } | null = null;
     for (let i = 1; i <= 5; i++) {
       const t = i / 5;
       const x = player.x + (muzzle.x - player.x) * t;
       const y = player.y + (muzzle.y - player.y) * t;
       if (this.map.pointBlocked(x, y, true)) {
-        const end: BulletEndEvent = { id: bullet.id, x, y, hit: "" };
-        this.broadcast("bulletEnd", end);
-        if (bullet.splash) this.explode(freeX, freeY, owner, bullet.weapon, bullet.splash, now, player.team);
-        else {
-          // Point-blank against the enemy core still counts.
-          const core = this.coreAt(x, y);
-          if (core) this.hurtCore(core, player.team, bullet.damage, now);
-        }
-        return;
+        blocked = { x, y };
+        break;
       }
       freeX = x;
       freeY = y;
     }
 
-    this.bullets.push(bullet);
+    // A shotgun fires a fan of pellets (evenly spread with a little jitter); other guns one bullet.
+    const pellets = gun.pellets ?? 1;
+    for (let k = 0; k < pellets; k++) {
+      const angle =
+        pellets > 1
+          ? player.angle + gun.spread * (((k + 0.5) / pellets) * 2 - 1) + ((Math.random() * 2 - 1) * gun.spread) / pellets
+          : player.angle + (Math.random() * 2 - 1) * gun.spread;
+      const bullet: Bullet = {
+        id: this.nextBulletId++,
+        owner,
+        team: player.team,
+        weapon: slot.weapon as WeaponId,
+        damage: gun.damage,
+        speed: gun.bulletSpeed,
+        x: muzzle.x,
+        y: muzzle.y,
+        vx: Math.cos(angle) * gun.bulletSpeed,
+        vy: Math.sin(angle) * gun.bulletSpeed,
+        expiresAt: now + gun.bulletLifeMs,
+        splash: gun.splash,
+      };
+      const shot: ShotEvent = { id: bullet.id, owner, weapon: bullet.weapon, x: bullet.x, y: bullet.y, angle };
+      if (k > 0) shot.pellet = true;
+      this.broadcast("shot", shot);
+
+      if (blocked) {
+        const end: BulletEndEvent = { id: bullet.id, x: blocked.x, y: blocked.y, hit: "" };
+        this.broadcast("bulletEnd", end);
+        if (bullet.splash) this.explode(freeX, freeY, owner, bullet.weapon, bullet.splash, now, player.team);
+        else {
+          // Point-blank against the enemy core still counts.
+          const core = this.coreAt(blocked.x, blocked.y);
+          if (core) this.hurtCore(core, player.team, bullet.damage, now);
+        }
+      } else {
+        this.bullets.push(bullet);
+      }
+    }
   }
 
   private moveBullets(dtMs: number, now: number) {
@@ -826,6 +1028,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
   private throwGrenade(owner: string, player: Player, slot: WeaponSlot, gun: GunStats, now: number) {
     slot.ammo--;
     player.nextShotAt = now + gun.fireMs;
+    player.revealedUntil = now + REVEAL_MS;
     const angle = player.angle + (Math.random() * 2 - 1) * gun.spread;
     const hand = muzzlePosition(player, player.angle, gun.muzzle);
     const g = new Grenade();
@@ -912,6 +1115,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
   /** Melee: hits everyone in reach, inside the swing's arc, with nothing solid in between. */
   private swing(owner: string, player: Player, weapon: WeaponId, stats: MeleeStats, now: number) {
     player.nextShotAt = now + stats.swingMs;
+    player.revealedUntil = now + REVEAL_MS;
     const hits: string[] = [];
 
     this.state.players.forEach((target, targetId) => {
@@ -953,6 +1157,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
    */
   private hurt(target: Player, targetId: string, attackerId: string, amount: number, now: number, weapon: WeaponId | "zone" | "car"): boolean {
     if (this.state.matchPhase === "ended") return false; // the match is decided: no more damage
+    target.revealedUntil = now + REVEAL_MS;
 
     let armored = false;
     if (weapon !== "zone" && target.armor > 0) {
@@ -1394,7 +1599,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
    */
   private kickIdlePlayers(now: number) {
     this.state.players.forEach((p, id) => {
-      if (now - p.lastActiveAt < idleKickMs) return;
+      if (this.isBot(id) || now - p.lastActiveAt < idleKickMs) return;
       p.lastActiveAt = now; // only try once
       console.log(`[${this.roomId}] ${p.name} kicked for being idle`);
       this.clients.getById(id)?.leave(IDLE_KICK_CODE, "idle");
@@ -1433,7 +1638,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
           const blue = this.teamSize("blue");
           const red = this.teamSize("red");
           if (blue === 0 || red === 0) this.endMatch(now, blue > 0 ? "blue" : red > 0 ? "red" : "");
-        } else if (s.aliveCount <= 1) {
+        } else if (s.aliveCount <= 1 || this.peopleAllOut()) {
           this.endMatch(now);
         }
         break;
@@ -1465,6 +1670,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     this.resetZone();
     this.resetCores();
     this.balanceTeams();
+    this.assignBotRoles();
     this.nextResupplyAt = now + RESUPPLY_MS;
     this.bullets = [];
     this.state.grenades.clear();
@@ -1493,7 +1699,8 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       s.players.forEach((p) => {
         if (!p.spectator) p.place = winnerTeam && p.team === winnerTeam ? 1 : 2;
       });
-    } else {
+    } else if (s.aliveCount <= 1) {
+      // (A practice match can end with several bots still standing: then nobody wins.)
       s.players.forEach((p, id) => {
         if (p.alive && !p.spectator) {
           winnerId = id;
@@ -1522,6 +1729,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
       p.place = 0;
       this.respawn(p);
     });
+    this.fillBots(); // practice: someone left or joined mid-match
   }
 
   /** Generate a random map and tell clients (they rebuild it from the same seed). */
@@ -1529,6 +1737,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; metadata: ArenaMetadata
     const seed = newMapSeed();
     this.map = new GameMap(seed, this.mode);
     this.state.mapSeed = seed;
+    if (this.practice) this.nav = new NavGrid(this.map);
     console.log(`[${this.roomId ?? "new room"}] ${this.mode} map ${seed}: ${this.map.blockThemes.join(", ")}`);
   }
 
